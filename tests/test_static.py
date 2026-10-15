@@ -958,6 +958,32 @@ def _():
             os.environ[k] = v if v is not None else ''
 
 
+@check('an unwritable Ghidra is caught before analysis, with both commands that fix it')
+def _():
+    home = ghidra_home(WORK / 'ghidra-sla')
+    ext = G.ee_extension(home)
+    langs = ext / 'data' / 'languages'
+    (langs / 'r5900.slaspec').write_text('define endian=little;\n')
+    assert G.sla_ready(ext), 'no .sla yet, but a writable directory: Ghidra does the compile itself'
+    sla = langs / G.SLA_NAME
+    sla.write_text('compiled')
+    assert G.sla_ready(ext)
+    if os.geteuid() == 0:
+        return                      # root reads and writes anything, so the modes below prove nothing
+    sla.chmod(0o000)
+    langs.chmod(0o555)
+    try:
+        assert not G.sla_ready(ext), 'an unreadable .sla in a read-only directory is not usable'
+        c = use_cfg(FakeCfg(WORK / 'ghidra-sla'))
+        c.ghidra = home
+        err = str(raises(G.GhidraError, G.need_extension))
+        assert f'{home / "support" / "sleigh"} -a {langs}' in err, err
+        assert f'chmod -R a+rX {ext}' in err, err    # without it the compiled .sla stays root-only
+    finally:
+        langs.chmod(0o755)
+        sla.chmod(0o644)
+
+
 @check('analyse imports one program with the EE processor and the configured timeout')
 def _():
     c = use_cfg(FakeCfg(WORK / 'ghidra-run'))
