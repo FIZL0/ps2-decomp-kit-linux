@@ -40,7 +40,12 @@ cheap one. So the kit ships a `PreToolUse` hook (`ps2kit/hooks/guard.py`, wired 
 cheap alternative in the refusal**:
 
 - an unbounded read of a decompilation or RAM dump → blocked, with the `./kit fn` / `./kit xref` /
-  `./kit data` command that answers the question instead
+  `./kit data` command that answers the question instead, and with the cap that works on any file at all:
+  append `| head -<n>`
+- a *bounded* read of one is allowed, including of a big binary container: anything piped into
+  `head`/`tail`/`wc`/`sed -n`, a capped grep (`grep -m5`, `grep -c`), and the byte-slice tools carrying
+  their own cap — `xxd -l 512`, `od -N 256`, `dd … count=256`, `head -c 512`. The cap has to be part of
+  the command that opens the file: a bare `xxd context/iso/BIG.BIN` is still refused
 - `pgrep -f` / `pkill -f` → rewritten to a name-only match, because a `-f` pattern matches the searching
   shell's own command line (so `pkill -f foo` can kill the process running it)
 - a polling loop wrapped around a test run → refused; use the blocking command and a long timeout
