@@ -93,6 +93,14 @@ def sla_ready(ext: Path) -> bool:
     return os.access(langs, os.W_OK)
 
 
+def sla_why(ext: Path) -> str:
+    """Which of the two states `sla_ready()` rejected, in words. The fix is the same; the state is not,
+    and on a freshly unzipped extension the file has simply never been compiled."""
+    sla = ext / 'data' / 'languages' / SLA_NAME
+    return ('its .sla has never been compiled' if not sla.is_file()
+            else 'its .sla cannot be read by this user')
+
+
 def sla_fix(ext: Path, home: Path | None = None) -> list[str]:
     """The two commands that make an unwritable install usable, in order.
 
@@ -111,9 +119,9 @@ def need_extension() -> Path:
     if ext:
         raise GhidraError(
             'the EmotionEngine extension is installed, but Ghidra cannot load its r5900 language:\n'
-            f'    {ext / "data" / "languages" / SLA_NAME}\n'
-            'is not readable, and its directory is not writable, so Ghidra cannot compile the shipped\n'
-            '.slaspec there either. It does that compile on first use, which is why this surfaces here\n'
+            f'    {sla_why(ext)}, and its directory is not writable, so Ghidra cannot compile the\n'
+            f'    shipped .slaspec there either:  {ext / "data" / "languages"}\n'
+            'It does that compile on first use, which is why this surfaces here\n'
             'rather than at install time. Fix it once (the chmod is not optional — sleigh under sudo\n'
             'writes the .sla root-only, and the next run fails identically):\n'
             + '\n'.join(f'    {cmd}' for cmd in sla_fix(ext))

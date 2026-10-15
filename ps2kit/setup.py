@@ -266,7 +266,7 @@ def doctor(argv: list[str]) -> int:
             _say(BAD, f'EmotionEngine extension present, but its {gh.SLA_NAME} is not usable',
                  'Ghidra compiles the shipped r5900.slaspec on first use and writes the .sla next to it,\n'
                  '        so `./kit ghidra analyse` is what discovers an install you cannot write to — five\n'
-                 '        seconds into the slow step. Here the .sla is unreadable and its directory is not\n'
+                 f'        seconds into the slow step. Here {gh.sla_why(ext)}, and its directory is not\n'
                  f'        writable: {ext / "data" / "languages"}\n'
                  '        Compile it now (the chmod matters: sleigh under sudo writes the .sla root-only):\n'
                  + '\n'.join(f'          {cmd}' for cmd in gh.sla_fix(ext, c.ghidra)))
