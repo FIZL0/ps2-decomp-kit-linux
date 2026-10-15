@@ -48,7 +48,7 @@ Every `cmd_*(argv)` takes the argument list after the subcommand, parses it with
 
 **Where the config is.** `ps2kit.config.CONFIG` is `kit.toml` in the repository root, unless
 `$KIT_CONFIG` (a file, or a directory holding one) or `$KIT_ROOT` (a directory) says otherwise —
-`crates/ps2-oracle` already honoured `$KIT_ROOT`, so both halves of the kit now agree on it. Only the
+`crates/kit-oracle` already honoured `$KIT_ROOT`, so both halves of the kit now agree on it. Only the
 config's *location* moves: `ROOT` stays the repository, because it also anchors `crates/`, `plan/` and
 the `kit` script. Two users: `./kit demo`, which writes a synthetic game's config into `context/demo/`
 rather than touching the user's, and tests that need a config of their own. A config reached this way
@@ -109,7 +109,7 @@ and no `kit.toml`.
 | `python3 tests/test_live.py` | the live layer against a fake emulator it builds itself: PINE framing, the pad language, RAM search, launch |
 | `python3 tests/test_record.py` | the watch-spec parser, region coalescing, torn-frame handling |
 | `python3 ps2kit/hooks/guard.py --self-test` | the context guard's decisions |
-| `cargo test --workspace` | `ps2-float`, the oracle interpreter, and your own port |
+| `cargo test --workspace` | the oracle's kit layer (`kit-oracle`) and your own port; `ps2-float` and `ps2-oracle` are tested in their own repositories |
 
 `./kit check` runs all of them in a kit checkout, as one gate with the usual one-line summary (the guard's
 self-test comes along inside `test_plan.py`). It has to: `[build] test` lives in `kit.toml`, which is
