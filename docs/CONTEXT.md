@@ -46,6 +46,12 @@ cheap alternative in the refusal**:
   `head`/`tail`/`wc`/`sed -n`, a capped grep (`grep -m5`, `grep -c`), and the byte-slice tools carrying
   their own cap — `xxd -l 512`, `od -N 256`, `dd … count=256`, `head -c 512`. The cap has to be part of
   the command that opens the file: a bare `xxd context/iso/BIG.BIN` is still refused
+- a **screenshot** is never a dump: `Read` on `context/shots/*.png` is allowed whatever it weighs, because
+  that tool renders an image instead of pasting its bytes, and looking at the shot is the point of taking
+  it. Only a shell command that would stream the PNG to stdout (`cat`, `base64`) is refused
+- a command that merely *names* a big file without reading it — `cp`, `mv`, `ls`, `stat`, `file`, `du`,
+  `magick … -resize` — is allowed: the guard is about what lands in the conversation, and none of those
+  put a byte there
 - `pgrep -f` / `pkill -f` → rewritten to a name-only match, because a `-f` pattern matches the searching
   shell's own command line (so `pkill -f foo` can kill the process running it)
 - a polling loop wrapped around a test run → refused; use the blocking command and a long timeout
