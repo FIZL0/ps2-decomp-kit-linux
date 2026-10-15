@@ -137,8 +137,10 @@ about which parts were checked.
 ./kit done T12 "port the walk speed ramp"
 ```
 
-`done` runs the tests, ticks the task, and commits. If the tests fail it refuses, and says whether the
-build broke or a test failed.
+`done` runs the tests, ticks the task, commits, and pushes the branch it committed on — your
+`task/<ID>` in a worktree, `main` in the main checkout. If the tests fail it refuses, and says whether
+the build broke or a test failed. A push that cannot be made is one line of output and nothing worse:
+the commit is already safe here, and the next wrap-up pushes it. `[git] push = false` turns it off.
 
 It also runs `./kit audit` before it commits: every file about to go in is checked for the addresses in
 your address file and for Ghidra's `FUN_…`/`DAT_…` placeholder names. Those belong in `research/` and in
@@ -170,6 +172,9 @@ What to expect from a long run:
   cleans the oldest when the total passes its cap, and the cap is in `kit.toml`.
 - Afterwards: `./kit plan` to see what moved, `git log --oneline` per branch, then merge. Read the
   journal entries before the diffs — they tell you which commits to trust.
+- Every merge is pushed, and the merged `task/<ID>` is dropped from the remote — so
+  `git ls-remote --heads origin` is the list of branches a merge went wrong on, and nothing a run
+  finished is only on this machine.
 
 If you run more than one emulator copy, each agent needs its own: `KIT_PCSX2=2` gives it its own config
 directory, its own PINE slot, its own pad and its own lock, so two agents cannot drive the same window.
