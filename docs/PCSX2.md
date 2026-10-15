@@ -89,6 +89,12 @@ On Linux this is `/dev/uinput` through `python-evdev`, and the pad identifies it
 controller so that SDL — and therefore PCSX2 — applies its standard mapping without any configuration.
 `./kit pad check` prints the `setfacl` command and the udev rule if permissions are missing.
 
+**A pad PCSX2 does not read passes every other check.** The device exists, `./kit pad send` reports
+success, and the game receives nothing — because controller *port 1* in that emulator's ini is bound to
+something else (commonly the keyboard, if that is how you play, which `./kit pcsx2 copy` then switches
+off). `./kit pad check` reads the ini and says so, and `./kit pcsx2 copy N` binds port 1 to the kit pad
+for copy N. It never touches your own config: bind port 1 there yourself, in Settings -> Controllers.
+
 **Never send `select`.** PCSX2's hotkeys are Select plus a shoulder button, so a `select` press
 triggers save-state and turbo hotkeys instead of reaching the game, and the resulting mess looks like a
 game bug. `./kit pad` refuses it outright.
@@ -136,7 +142,7 @@ Unattended runs want more than one emulator. `KIT_PCSX2=N` gives a process its o
 | config directory | its own, copied from yours on first use |
 | PINE slot | base slot + N, so sockets never collide |
 | lock | its own, so copy 1 and copy 2 never block each other |
-| pad | its own, pinned by the SDL device filter |
+| pad | its own, pinned by the SDL device filter, on the copy's controller port 1 |
 
 So `KIT_PCSX2=2 ./kit pcsx2 start` is a second, independent emulator, and every tool run with the same
 variable set talks to that one. This is what makes `./kit run 3` possible.

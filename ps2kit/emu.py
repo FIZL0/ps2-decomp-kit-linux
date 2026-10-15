@@ -11,6 +11,9 @@ Three jobs live here, and each exists because of a specific trap:
   memory-card directories, muted, keyboard input off (a window that steals focus must not let the user's
   typing pause a capture) and pause bound to pad N's Guide button, because a copy on a hidden workspace has
   no window anyone can click. `KIT_PCSX2=N` then points every kit tool, the pad, PINE and the lock at copy N.
+  It also binds the kit pad to **controller port 1** (`PAD1_SDL`): a copy inherits the user's port 1, so on
+  a keyboard-playing machine port 1 points at the very input source the copy switches off, and the game
+  then receives nothing while every kit command still reports success.
 * **Getting pixels and RAM out.** `shot()` grabs the window if the compositor can see it and otherwise
   presses the emulator's own Screenshot hotkey through the virtual pad — which is the only thing that works
   for a copy on another workspace, and is needed far more often than it sounds. `state_ram()` pulls
@@ -36,6 +39,25 @@ from ps2kit import platform_ as plat
 from ps2kit.config import ROOT, cfg, num
 
 SKIP_IN_COPY = {'cache', 'covers', 'snaps', 'videos', 'logs', 'dumps', 'textures', 'gamesettings'}
+
+# Controller port 1, bound to the kit's pad, in the Xbox-style layout `ps2kit/pad.py` presents (the pad
+# identifies as a 360 pad precisely so SDL applies that mapping with no per-device configuration).
+#
+# Without this, a copy inherits the *user's* port 1 — on a machine where they play with the keyboard that
+# is `Cross = Keyboard/K`, `Start = Keyboard/Return` — and `copy_config` then switches the Keyboard input
+# source off. Nothing reports a problem: `./kit pad check` passes, `./kit pad send` reports success,
+# `./kit shot` works because it names SDL-0 explicitly, and the game receives nothing. An agent then sees
+# attract mode changing on its own and concludes the game ignores Start.
+PAD1_SDL = {
+    'Up': 'DPadUp', 'Down': 'DPadDown', 'Left': 'DPadLeft', 'Right': 'DPadRight',
+    'Cross': 'A', 'Circle': 'B', 'Square': 'X', 'Triangle': 'Y',
+    'Start': 'Start', 'Select': 'Back',
+    'L1': 'LeftShoulder', 'R1': 'RightShoulder',
+    'L2': '+LeftTrigger', 'R2': '+RightTrigger',
+    'L3': 'LeftStick', 'R3': 'RightStick',
+    'LUp': '-LeftY', 'LDown': '+LeftY', 'LLeft': '-LeftX', 'LRight': '+LeftX',
+    'RUp': '-RightY', 'RDown': '+RightY', 'RLeft': '-RightX', 'RRight': '+RightX',
+}
 
 
 # --- this instance -----------------------------------------------------------
@@ -116,6 +138,98 @@ def _ini_get(path: Path, key: str, default: str = '') -> str:
         if re.match(rf'\s*{re.escape(key)}\s*=', l):
             return l.split('=', 1)[1].strip()
     return default
+
+
+def _ini_set_in(path: Path, section: str, pairs: list[tuple[str, str]]) -> None:
+    """Set keys *inside one section*, leaving identically-named keys in every other section alone.
+
+    `_ini_set` is section-blind, which is right for the settings whose section PCSX2 has moved between
+    versions, and wrong here: `[Pad1]`, `[Pad2]` and `[USB1]` share every key name there is (`Type`,
+    `Start`, `Up`), so a section-blind write of controller port 1 can land on port 2 instead — binding
+    the pad to a port no game reads, which is the very failure this is here to prevent.
+    """
+    if not path.exists():
+        raise SystemExit(f'no PCSX2 ini at {path}\nStart PCSX2 once so it writes its config, then retry.')
+    lines = path.read_text(encoding='utf-8', errors='surrogateescape').splitlines()
+    start = next((i for i, l in enumerate(lines) if l.strip() == f'[{section}]'), None)
+    if start is None:
+        lines += ['', f'[{section}]'] + [f'{k} = {v}' for k, v in pairs]
+    else:
+        end = next((i for i in range(start + 1, len(lines)) if lines[i].lstrip().startswith('[')),
+                   len(lines))
+        for k, v in pairs:
+            pat = re.compile(rf'\s*{re.escape(k)}\s*=')
+            for i in range(start + 1, end):
+                if pat.match(lines[i]):
+                    lines[i] = f'{k} = {v}'
+                    break
+            else:
+                lines.insert(end, f'{k} = {v}')
+                end += 1
+    path.write_text('\n'.join(lines) + '\n', encoding='utf-8', errors='surrogateescape')
+
+
+def _ini_section(path: Path, section: str) -> dict[str, str]:
+    """Every key in one section of a PCSX2 ini.
+
+    `_ini_get` is section-blind on purpose (PCSX2 moves keys between versions). This is for the one
+    question that genuinely is about a section: what controller port 1 is bound to, where the key names
+    (`Start`, `Select`, `Up`) collide with hotkeys and other ports.
+    """
+    out: dict[str, str] = {}
+    if not path.exists():
+        return out
+    here = ''
+    for l in path.read_text(encoding='utf-8', errors='surrogateescape').splitlines():
+        s = l.strip()
+        if s.startswith('[') and s.endswith(']'):
+            here = s[1:-1]
+        elif here == section and '=' in s and not s.startswith(('#', ';')):
+            k, v = s.split('=', 1)
+            out[k.strip()] = v.strip()
+    return out
+
+
+def pad1_rows(dev: str = 'SDL-0') -> list[tuple[str, str, str]]:
+    """The `[Pad1]` settings that put the kit's pad on controller port 1 — see `PAD1_SDL`.
+
+    `Type` is in here because a port whose type is `None` also receives nothing, silently, in exactly
+    the same way as one bound to an input source that is switched off.
+    """
+    return [('Pad1', 'Type', 'DualShock2')] + [('Pad1', k, f'{dev}/{v}') for k, v in PAD1_SDL.items()]
+
+
+def pad1_sources(inst: str | None = None) -> set[str]:
+    """Which input sources this instance's controller port 1 is bound to ('SDL', 'Keyboard', …)."""
+    out = set()
+    for v in _ini_section(ini_path(inst), 'Pad1').values():
+        for part in v.split('&'):
+            if '/' in part:
+                out.add(part.strip().split('/')[0].split('-')[0])
+    return out
+
+
+def pad1_problem(inst: str | None = None) -> str | None:
+    """Why this instance's controller port 1 will receive nothing, or None.
+
+    Only what the ini *says* counts: a source key that is absent keeps PCSX2's own default (Keyboard and
+    SDL on), and guessing at defaults here would invent problems. What this catches is the combination
+    the kit itself used to create — port 1 bound to a source some other setting has switched off.
+    """
+    ini = ini_path(inst)
+    if not ini.exists():
+        return None
+    pad1 = _ini_section(ini, 'Pad1')
+    if not pad1:
+        return 'no [Pad1] section: controller port 1 is unbound'
+    if pad1.get('Type', 'DualShock2') in ('None', ''):
+        return 'controller port 1 has no pad plugged in ([Pad1] Type = None)'
+    srcs = _ini_section(ini, 'InputSources')
+    off = sorted(s for s in pad1_sources(inst) if srcs.get(s, '').lower() == 'false')
+    if off and not (pad1_sources(inst) - set(off)):
+        return (f'controller port 1 is bound to {", ".join(off)}, which [InputSources] has off — '
+                'every button press goes nowhere')
+    return None
 
 
 def _folder(key: str, default: str) -> Path:
@@ -270,6 +384,10 @@ def copy_config(n: int) -> Path:
         ('Folders', 'Snapshots', str(dst / 'snaps')),
     ]:
         _ini_set(ini, section, key, value)
+    # The pad also has to be *on controller port 1*, or none of that input reaches the game: a copy
+    # inherits the user's own port 1, which on a keyboard-playing machine is bound to the input source
+    # switched off two lines above. Section-aware, because [Pad2] shares these key names.
+    _ini_set_in(ini, 'Pad1', [(k, v) for _, k, v in pad1_rows()])
     _ini_del(ini, 'FrameAdvance')   # frame-advance bound to a pad button pauses copies by accident
     for sub in ('savestates', 'memcards', 'snaps', 'logs'):
         (dst / sub).mkdir(parents=True, exist_ok=True)
