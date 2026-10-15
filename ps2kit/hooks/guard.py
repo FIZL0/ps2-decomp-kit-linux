@@ -9,8 +9,10 @@ What it does, and why each one earned its place:
 **A whole-file read of a decompilation dump.** `./kit ghidra` writes one C file per program, and for a PS2
 game that is 5–20 MB. A `Read` without `offset`/`limit`, or a `cat`/`grep` without a cap, puts all of it in
 the conversation — which is then re-read on every following turn, so the session is over. Blocked, with the
-three cheap ways to get the same answer: `./kit fn <addr>` for one function, `./kit xref <addr>` for its
-callers and callees, `Read` with `offset`+`limit`, or a capped grep.
+cheap ways to get the same answer: append `| head -<n>` to cap any command's output, read a binary header
+with a tool that carries its own cap (`xxd -l`, `od -N`, `dd count=`, `head -c`), or, for code, `./kit fn
+<addr>` for one function, `./kit xref <addr>` for its callers and callees, `Read` with `offset`+`limit`, a
+capped grep.
 
 **`pgrep -f` / `pkill -f`.** With `-f`, pgrep matches against whole command lines — including the command line
 of the shell that is doing the searching, because the pattern is literally in it. So `pgrep -f pcsx2` always
@@ -53,9 +55,19 @@ LOOP = re.compile(r'\b(while|until)\b[\s\S]{0,120}?\bdo\b[\s\S]{0,400}?\b(pgrep|
                   r'tail\s+-f\s+--pid')
 # A long sleep: only a problem next to something that finishes on its own and notifies.
 SLEEPY = re.compile(r'\bsleep\s+([3-9]\d|\d{3,})')
-# `cat x`, `grep pat x`, `head -c big x`… with no cap on the output
+# `cat x`, `grep pat x`, `head -c big x`… with no cap on the output. Anything behind a pipe caps whatever
+# fed it, so this one is judged over the whole command line.
 CAPPED = re.compile(r'\./kit\s+(fn|xref|dis|data)\b|\|\s*(head|tail|wc|sed\b)|'
                     r'\bgrep\b[^|]*\s-[a-zA-Z]*[mcl]|\bwc\b|\bsed\s+-n|\bhead\s+-|\btail\s+-')
+# The byte-slice tools carry their own cap, which is how you read a binary header: `xxd -l 512 f`,
+# `od -N 256 f`, `dd … count=256`, `head -c 512 f`. The cap has to belong to the command that opens the
+# file, so this one is matched inside that command's own pipeline segment only (`_segment`): a capped
+# `xxd` in another segment or another statement caps its own output, not this read. Every alternative
+# needs the flag *and* a digit, so a bare `xxd context/iso/BIG.BIN` is still uncapped.
+SELF_CAPPED = re.compile(r'\bxxd\b[^|;&\n]*?\s-(?:l\s*\d|-len(?:gth)?[= ]\s*\d)|'
+                         r'\bod\b[^|;&\n]*?\s-(?:N\s*\d|-read-bytes[= ]\s*\d)|'
+                         r'\bdd\b[^|;&\n]*?\scount=\d|'
+                         r'\bhead\b[^|;&\n]*?\s-(?:c\s*\d|-bytes[= ]\s*\d)')
 
 
 def _cfg():
@@ -100,10 +112,21 @@ def _is_dump(path: str) -> str | None:
     return None
 
 
-HOW = ('Use `./kit fn <addr>` for one function, `./kit xref <addr>` for its callers and callees '
-       '(`--similar` for look-alikes), `Read` with offset+limit, or a capped grep (`grep -m5`, `grep -c`, '
-       '`| head`). Reading it whole puts megabytes in the conversation, which is then re-read on every turn '
-       'for the rest of the session.')
+HOW = ('It is not off limits — cap the output and the same command is allowed. Appending `| head -40` '
+       '(any n) to a Bash command caps it and satisfies this guard, whatever the file is; for a binary '
+       'header, `xxd -l 512`, `od -N 256`, `dd count=256` and `head -c 512` carry their own cap. For code, '
+       '`./kit fn <addr>` gives one function, `./kit xref <addr>` its callers and callees (`--similar` for '
+       'look-alikes), `Read` takes offset+limit, and a grep can be capped (`grep -m5`, `grep -c`). Reading '
+       'it whole puts megabytes in the conversation, which is then re-read on every turn for the rest of '
+       'the session.')
+
+
+def _segment(cmd: str, pos: int) -> str:
+    """The one pipeline segment of `cmd` holding offset `pos`: where a tool's own cap flag has to sit."""
+    seps = '|;&\n'
+    start = max((cmd.rfind(c, 0, pos) for c in seps), default=-1) + 1
+    ends = [i for i in (cmd.find(c, pos) for c in seps) if i >= 0]
+    return cmd[start:min(ends)] if ends else cmd[start:]
 
 
 def decide(ev: dict) -> tuple[int, str, dict | None]:
@@ -126,8 +149,9 @@ def decide(ev: dict) -> tuple[int, str, dict | None]:
         return 0, '', None
 
     # a dump named in a shell command with nothing capping the output
-    for tok in re.findall(r'[\w./@~-]+', cmd):
-        if _is_dump(tok) and not CAPPED.search(cmd):
+    for m in re.finditer(r'[\w./@~-]+', cmd):
+        tok = m.group()
+        if _is_dump(tok) and not CAPPED.search(cmd) and not SELF_CAPPED.search(_segment(cmd, m.start())):
             return 2, f'`{tok}` is too big to read whole. {HOW}', None
 
     # polling loops around test runs and background tasks
@@ -210,6 +234,31 @@ def self_test() -> int:
         ({'tool_name': 'Read', 'tool_input': {'file_path': 'ps2kit/plan.py'}}, 0),
         ({'tool_name': 'Bash', 'tool_input': {'command': 'cat context/decomp/game.c'}}, 2),
         ({'tool_name': 'Bash', 'tool_input': {'command': 'grep -m3 foo context/decomp/game.c'}}, 0),
+        ({'tool_name': 'Bash', 'tool_input': {'command': 'cat context/decomp/game.c | head -40'}}, 0),
+        # the byte-slice tools: the flag *is* the cap, so each tool's bare form is still refused
+        ({'tool_name': 'Bash', 'tool_input': {'command': 'xxd -l 512 context/decomp/game.c'}}, 0),
+        ({'tool_name': 'Bash', 'tool_input': {'command': 'xxd -s 0x100 -l512 context/decomp/game.c'}}, 0),
+        ({'tool_name': 'Bash', 'tool_input': {'command': 'xxd --length=512 context/decomp/game.c'}}, 0),
+        ({'tool_name': 'Bash', 'tool_input': {'command': 'xxd context/decomp/game.c'}}, 2),
+        ({'tool_name': 'Bash', 'tool_input': {'command': 'xxd -g 1 context/decomp/game.c'}}, 2),
+        ({'tool_name': 'Bash', 'tool_input': {'command': 'xxd -l context/decomp/game.c'}}, 2),
+        ({'tool_name': 'Bash', 'tool_input': {'command': 'od -N 256 -t x1z context/decomp/game.c'}}, 0),
+        ({'tool_name': 'Bash', 'tool_input': {'command': 'od -A x -N256 context/decomp/game.c'}}, 0),
+        ({'tool_name': 'Bash', 'tool_input': {'command': 'od --read-bytes=256 context/decomp/game.c'}}, 0),
+        ({'tool_name': 'Bash', 'tool_input': {'command': 'od -A x -t x1 context/decomp/game.c'}}, 2),
+        ({'tool_name': 'Bash',
+          'tool_input': {'command': 'dd if=context/decomp/game.c bs=1 count=256 status=none'}}, 0),
+        ({'tool_name': 'Bash',
+          'tool_input': {'command': 'dd if=context/decomp/game.c of=/tmp/copy.bin status=none'}}, 2),
+        ({'tool_name': 'Bash', 'tool_input': {'command': 'head -c 512 context/decomp/game.c'}}, 0),
+        ({'tool_name': 'Bash', 'tool_input': {'command': 'head --bytes=512 context/decomp/game.c'}}, 0),
+        # a cap belonging to some other command in the line cannot bless this read
+        ({'tool_name': 'Bash',
+          'tool_input': {'command': 'xxd -l 16 small.bin; xxd context/decomp/game.c'}}, 2),
+        ({'tool_name': 'Bash',
+          'tool_input': {'command': 'xxd -l 16 small.bin && cat context/decomp/game.c'}}, 2),
+        ({'tool_name': 'Bash',
+          'tool_input': {'command': 'xxd -l 16 small.bin | xxd context/decomp/game.c'}}, 2),
         ({'tool_name': 'Bash', 'tool_input': {'command': 'sleep 120; pgrep -f ./kit check'}}, 2),
         ({'tool_name': 'Bash', 'tool_input': {'command': 'while true; do sleep 60; pgrep -x claude; done'}}, 2),
         ({'tool_name': 'Bash', 'tool_input': {'command': 'while read l; do echo $l; done < f'}}, 0),
