@@ -173,7 +173,19 @@ Install Ghidra, then add the PS2 CPU:
 
 1. Download `ghidra-emotionengine-reloaded` for **your exact Ghidra version**.
 2. Unzip it into `<ghidra>/Ghidra/Extensions/`.
-3. Start Ghidra's GUI once so it registers the extension, then close it.
+3. Start Ghidra's GUI once so it registers the extension, then close it — or, on a headless box (and for
+   an agent, where the GUI is not an option), compile the language from the command line instead:
+
+   ```sh
+   sudo <ghidra>/support/sleigh -a <ghidra>/Ghidra/Extensions/ghidra-emotionengine-reloaded/data/languages
+   sudo chmod -R a+rX <ghidra>/Ghidra/Extensions/ghidra-emotionengine-reloaded
+   ```
+
+   The extension ships `r5900.slaspec`, not the compiled `r5900.sla`; Ghidra compiles it on first use and
+   writes it *into the Ghidra install*. On a packaged, root-owned Ghidra (`/opt/ghidra`) that write fails,
+   and the first thing to find out is `./kit ghidra analyse`, five seconds in. Drop the `sudo` if Ghidra
+   lives somewhere you own; keep the `chmod` if you used it, because `sleigh` under `sudo` writes the
+   `.sla` root-only and the next run fails the same way. `./kit doctor` checks for exactly this.
 
 Set `[ghidra] home` in `kit.toml` if `./kit setup` did not find it, then:
 
