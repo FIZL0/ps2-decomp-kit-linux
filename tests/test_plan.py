@@ -18,9 +18,9 @@ import re
 import shlex
 import subprocess
 import sys
-import threading
 import tempfile
 import tomllib
+import threading
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -28,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from ps2kit import plan  # noqa: E402
 from ps2kit import journal as J  # noqa: E402
 from ps2kit import checks  # noqa: E402
-from ps2kit.config import Config  # noqa: E402
+from ps2kit.config import Config, cfg  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 FAILED: list[str] = []
@@ -183,18 +183,29 @@ def test_shipped_backlog():
     ls = plan.lines(todo)
     ids = [m.group(3) for l in ls if (m := plan.ITEM.match(l))]
     eq(len(ids), len(set(ids)), 'every id in plan/TODO.md is unique')
-    check(25 <= len(ids) <= 60, f'{len(ids)} tasks: a session each, enough to start a port')
+    # The count is about the backlog this kit *ships*: enough to start a port, few enough to read in one
+    # sitting. A port repo running this suite by hand has its own backlog, which shrinks as tasks land and
+    # grows when one is split, so the bound is none of its business. `self_steps` is already the one
+    # definition of "this working tree is the kit's own repo", so the gate reuses it instead of inventing
+    # a second answer to the same question.
+    if checks.self_steps(cfg(False)):
+        check(25 <= len(ids) <= 60, f'{len(ids)} tasks: a session each, enough to start a port')
     check(any(l.startswith('### Stretch') for l in ls), 'there is a ### Stretch section')
     check(all(' → ' in l or ' | ' in l for l in ls if plan.ITEM.match(l)),
           'every task line names the files it touches or the test it adds')
     for name in ('DONE.md', 'HUMAN.md', 'REFERENCE.md'):
         check((ROOT / 'plan' / name).exists(), f'plan/{name} exists')
-    # the ids on the line are what `(after X)` and the runner match on
+    # The ids on the line are what `(after X)` and the runner match on — and a *satisfied* dependency is
+    # ticked into DONE.md and gone from TODO.md, which is how `runner.pick` reads it. Asserting the name
+    # is still open would fail the moment a port lands its first dependency, i.e. exactly when the
+    # mechanism is working.
+    done = [m.group(3) for l in plan.lines(ROOT / 'plan/DONE.md') if (m := plan.ITEM.match(l))]
     for l in ls:
         if not plan.ITEM.match(l):
             continue
         if m := re.search(r'\(after (\w+)\)', l):
-            check(m.group(1) in ids, f'(after {m.group(1)}) names a task that exists')
+            check(m.group(1) in ids or m.group(1) in done,
+                  f'(after {m.group(1)}) names a task that exists, open or already done')
 
 
 def test_atomic_write():
