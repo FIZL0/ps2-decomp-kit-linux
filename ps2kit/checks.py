@@ -9,6 +9,12 @@ that matters most — it says plainly whether the **build** broke or a **test** 
 opposite next moves (fix a compile error you just introduced vs. go and look at the thing you are porting),
 and an agent that cannot tell them apart will happily "fix" a passing port to satisfy a type error.
 
+In the kit's *own* repository there is no `[build] test` to run: `kit.toml` is git-ignored by design, so
+this repo can never ship one, and `./kit check` here had nothing to run at all — leaving the kit's own four
+suites reachable only through the raw `python3 tests/…` call its own rules tell you not to use. So when
+nothing is configured and the tree is recognisably the kit itself, check runs the kit's own suites instead;
+see `self_steps`. A *port* with no test gate still gets the warning, because it has to be told.
+
 `./kit done` is the wrap-up every task ends with: tests, then tick (or block), then commit, in one call. One
 call because three calls means three chances to commit work that does not build, and because the tick and the
 commit belong to the same decision. On failure it changes nothing at all.
@@ -29,6 +35,7 @@ from __future__ import annotations
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -157,12 +164,18 @@ def _run(cmd: str, extra: list[str], cwd: Path, log: Path, env=None) -> int:
     if '{jobs}' in cmd:
         cmd = cmd.replace('{jobs}', str(jobs))
     full = cmd + (' ' + ' '.join(shlex.quote(a) for a in extra) if extra else '')
-    e = {**os.environ, 'KIT_JOBS': str(jobs), 'RUST_TEST_THREADS': os.environ.get('RUST_TEST_THREADS', str(jobs)),
-         'CARGO_BUILD_JOBS': os.environ.get('CARGO_BUILD_JOBS', str(jobs)), **(env or {})}
+    e = _env(jobs, env)
     with open(log, 'w', encoding='utf-8') as f:
         f.write(f'$ {full}\n(cwd {cwd}, {jobs} jobs)\n\n')
         f.flush()
         return subprocess.run(full, shell=True, cwd=str(cwd), stdout=f, stderr=subprocess.STDOUT, env=e).returncode
+
+
+def _env(jobs: int, extra: dict | None = None) -> dict:
+    """The environment a test command runs in: its share of the cores, however the runner asks for it."""
+    return {**os.environ, 'KIT_JOBS': str(jobs),
+            'RUST_TEST_THREADS': os.environ.get('RUST_TEST_THREADS', str(jobs)),
+            'CARGO_BUILD_JOBS': os.environ.get('CARGO_BUILD_JOBS', str(jobs)), **(extra or {})}
 
 
 def _passed_count(text: str) -> int | None:
@@ -223,33 +236,101 @@ def _rel(p: Path) -> str:
         return str(p)
 
 
+# --- the kit's own suites ------------------------------------------------------
+
+# The kit's own tests: plain scripts, no framework, no kit.toml, no emulator, a few seconds all told.
+# `ps2kit/hooks/guard.py --self-test` is not a step of its own — `tests/test_plan.py` runs it.
+SELF_SUITES = ('tests/test_static.py', 'tests/test_live.py', 'tests/test_record.py', 'tests/test_plan.py')
+SELF_CARGO = 'cargo test --workspace -q'
+
+
+def self_steps(c) -> list[tuple[str, str]]:
+    """`(name, command)` per suite when this working tree is the kit's own repo, else `[]`.
+
+    Narrow on purpose, because the message it replaces is load-bearing. Three things have to hold: nothing
+    is configured (`[build] test` wins whenever it is set), no game has been set up, and the kit's own
+    files are actually here. "No game" means no `[game]` table at all: a port repo has one from the moment
+    `kit.toml` is copied from the example, filled in or not, so a port keeps the warning and `./kit done`
+    keeps saying it is committing without a test gate.
+    """
+    if c.test_cmd or c.raw.get('game'):
+        return []
+    if not (ROOT / 'ps2kit' / 'cli.py').exists():
+        return []
+    steps = [(Path(s).stem.replace('test_', ''),
+              f'{shlex.quote(sys.executable)} {shlex.quote(str(ROOT / s))}')
+             for s in SELF_SUITES if (ROOT / s).exists()]
+    if not steps:
+        return []
+    # cargo is in, despite being the slow one: `crates/game-sim` is nearly empty by design, but
+    # `ps2-float` (bit-exact EE arithmetic) and `ps2-oracle` (the interpreter every oracle test runs on)
+    # are the kit's own substance, and a cold workspace run is a couple of seconds. A gate that left them
+    # out would claim more than it checks.
+    if (ROOT / 'Cargo.toml').exists() and shutil.which('cargo'):
+        steps.append(('cargo', SELF_CARGO))
+    return steps
+
+
+def _run_steps(steps: list[tuple[str, str]], cwd: Path, log: Path) -> int:
+    """Run every step into one log and return the first non-zero exit.
+
+    Every step runs even after one fails: four suites in one call should report all four, not send you
+    round the loop once per broken one. `summarise` then reads the whole log, so the output contract is
+    unchanged — one line when it all passed, build errors *or* test failures when it did not.
+    """
+    jobs, rc = _jobs(), 0
+    with open(log, 'w', encoding='utf-8') as f:
+        f.write(f'$ kit self-test: {", ".join(n for n, _ in steps)}\n(cwd {cwd}, {jobs} jobs)\n\n')
+        f.flush()
+        for name, cmd in steps:
+            f.write(f'$ {cmd}\n')
+            f.flush()
+            r = subprocess.run(cmd, shell=True, cwd=str(cwd), stdout=f, stderr=subprocess.STDOUT,
+                               env=_env(jobs, {'KIT_SELF_TEST': '1'}))
+            f.write(f'\n[{name}] exit {r.returncode}\n\n')
+            f.flush()
+            rc = rc or r.returncode
+    return rc
+
+
 # --- ./kit check ---------------------------------------------------------------
 
 def cmd_check(argv: list[str]) -> int:
     from ps2kit.cli import parser  # function-local: nothing in the kit imports cli at module level
     ap = parser('check', __doc__)
     ap.add_argument('extra', nargs='*', metavar='ARG',
-                    help='passed through to [build] test, e.g. ./kit check -p sim --test flights')
+                    help='passed through to [build] test, e.g. ./kit check -p sim --test flights; '
+                         "in the kit's own repo, which of its suites to run (e.g. ./kit check plan cargo)")
     ap.add_argument('--no-gate', action='store_true', help='skip the concurrency gate (one-off, interactive)')
     a, unknown = ap.parse_known_args(argv)
     extra = a.extra + unknown
 
     c = cfg(False)
-    if not c.test_cmd:
+    # KIT_SELF_TEST is set for the suites `_run_steps` starts: a suite that shells out to `./kit check`
+    # gets the no-test-command message rather than starting the whole gate again inside itself.
+    steps = [] if os.environ.get('KIT_SELF_TEST') else self_steps(c)
+    if not c.test_cmd and not steps:
         print('No test command configured. Set [build] test in kit.toml, e.g.\n'
               '    [build]\n    test = "cargo test -q"\n'
               'Until then there is no test gate, and `./kit done` will refuse to commit.', file=sys.stderr)
         return 2
+    if steps and extra:  # here the extra args name suites, rather than being a runner's own flags
+        want = [s for s in steps if any(f.strip('-') in s[0] for f in extra)]
+        if not want:
+            print(f'./kit check: no suite of the kit\'s own matches {" ".join(extra)} '
+                  f'(have: {", ".join(n for n, _ in steps)})', file=sys.stderr)
+            return 2
+        steps = want
     cwd = Path.cwd() if (Path.cwd() / '.git').exists() else ROOT
     log = _log_path()
     lock = None if a.no_gate else _slot()
     try:
         _cap_build_dirs(cwd)
-        rc = _run(c.test_cmd, extra, cwd, log)
+        rc = _run_steps(steps, cwd, log) if steps else _run(c.test_cmd, extra, cwd, log)
     finally:
         if lock:
             lock.release()
-    for l in summarise(rc, log):
+    for l in summarise(rc, log, 'SELF-TEST' if steps else 'TESTS'):
         print(l)
     return 0 if rc == 0 else 1
 

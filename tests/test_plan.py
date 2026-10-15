@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -25,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from ps2kit import plan  # noqa: E402
 from ps2kit import journal as J  # noqa: E402
 from ps2kit import checks  # noqa: E402
+from ps2kit.config import Config  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 FAILED: list[str] = []
@@ -256,6 +258,34 @@ def test_check_summary():
         has('\n'.join(out), r'full log: ', 'and points at the full copy on disk')
 
 
+def test_self_test_gate():
+    print("checks: what `./kit check` runs when kit.toml cannot configure it — the kit's own repo")
+    names = [n for n, _ in checks.self_steps(Config(raw={}))]
+    for want in ('static', 'live', 'record', 'plan'):
+        check(want in names, f'with nothing configured, check runs the kit\'s own {want} suite', str(names))
+    for name, cmd in checks.self_steps(Config(raw={})):
+        if name != 'cargo':
+            check(Path(shlex.split(cmd)[-1]).exists(), f'the {name} step points at a suite that is there', cmd)
+
+    eq(checks.self_steps(Config(raw={'build': {'test': 'cargo test -q'}})), [],
+       'a configured [build] test always wins — the kit never second-guesses a port')
+    eq(checks.self_steps(Config(raw={'game': {'serial': 'SLUS-20000'}})), [],
+       'and a repo with a game in it is a port, so it keeps the no-test-gate warning')
+
+    # The warning is load-bearing: a port with no test gate has to be told so, and told it the same way as
+    # before. Run it as a port would see it — a kit.toml with a [game] and no [build] test.
+    with tempfile.TemporaryDirectory() as tmp:
+        toml = Path(tmp) / 'kit.toml'
+        toml.write_text('[game]\nname = "A Port"\nserial = "SLUS-20000"\n', encoding='utf-8')
+        r = subprocess.run([sys.executable, str(ROOT / 'kit'), 'check'], capture_output=True, text=True,
+                           cwd=str(ROOT), env={**os.environ, 'KIT_CONFIG': str(toml)}, timeout=120)
+        eq(r.returncode, 2, 'a port with no [build] test still fails `./kit check`')
+        has(r.stderr, r'^No test command configured\. Set \[build\] test in kit\.toml',
+            'with the unchanged message that says how to fix it')
+        check('PASSED' not in r.stdout and 'FAILED' not in r.stdout,
+              'and nothing of the kit\'s own is run in a port', r.stdout[:200])
+
+
 def test_audit():
     print('checks: the address audit, which is the only thing enforcing "no retail address in the port"')
     with tempfile.TemporaryDirectory() as tmp:
@@ -393,8 +423,8 @@ def test_cli_help():
 
 def main() -> int:
     for t in (test_plan_roundtrip, test_plan_index_and_sections, test_brief, test_shipped_backlog,
-              test_journal, test_check_summary, test_audit, test_guard, test_inbox, test_runner_picking,
-              test_stop_hook_never_crashes, test_cli_help):
+              test_journal, test_check_summary, test_self_test_gate, test_audit, test_guard,
+              test_inbox, test_runner_picking, test_stop_hook_never_crashes, test_cli_help):
         t()
     print()
     if FAILED:

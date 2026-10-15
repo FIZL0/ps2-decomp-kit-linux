@@ -111,5 +111,11 @@ and no `kit.toml`.
 | `python3 ps2kit/hooks/guard.py --self-test` | the context guard's decisions |
 | `cargo test --workspace` | `ps2-float`, the oracle interpreter, and your own port |
 
+`./kit check` runs all of them in a kit checkout, as one gate with the usual one-line summary (the guard's
+self-test comes along inside `test_plan.py`). It has to: `[build] test` lives in `kit.toml`, which is
+git-ignored, so the kit's own repo can never ship one. Name suites to narrow it — `./kit check plan cargo`.
+A tree with a `[game]` in its `kit.toml` is a port, not the kit, so there `./kit check` runs `[build] test`
+and still says there is no test gate when nothing is configured.
+
 What they deliberately do not cover: anything that needs PCSX2, Ghidra, a disc or a real pad. Those are
 checked by `./kit doctor` and by using them.
