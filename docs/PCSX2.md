@@ -116,6 +116,12 @@ It grabs the emulator's window — through the compositor on Wayland, through X 
 PCSX2's own screenshot hotkey if neither works. Screenshots go in the private directory, never in the
 journal or the repo: they are game data.
 
+**A window grab is given 15 seconds and no more** (`KIT_GRAB_TIMEOUT` to change it). It is not a slow
+path that needs patience: on wlroots, `grim` returns in milliseconds while PCSX2 is stopped and never
+returns at all once PCSX2 is rendering a game, because the emulator's game surface wedges screencopy. The
+hotkey fallback works perfectly at that same moment, so a helper that has not answered by then is treated
+as one that cannot see the window — which is what makes the fallback reachable rather than theoretical.
+
 For anything visual, take the original and your port at the same moment and look at them side by side.
 It costs a minute and settles arguments that otherwise go several messages.
 
