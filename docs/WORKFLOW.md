@@ -168,6 +168,14 @@ What to expect from a long run:
   sequential session in the current checkout and says so.
 - Each agent works on `task/<ID>` in its own worktree, with its own build directory, so three can run
   tests at once. Merge them afterwards; conflicts are rare if tasks were picked for different files.
+- The conflicts that do happen are mostly two agents appending to the same list, so the run joins those
+  itself and says which files it joined: the task list and its archive, the journal, and the oracle's
+  address list — files where a line is a whole record and both sides' records belong. Anything else it
+  leaves alone, with the branch and the target untouched, and names the files in `LEFT FOR A HUMAN`.
+  Prose is on the "leaves alone" side on purpose, including `PLAN.md`'s code map: joining two reflowed
+  paragraphs line by line produces something that reads like a sentence and is not one. So is the
+  address list when the two sides give one name different addresses — the whole point of joining is
+  that both sides belong, and there exactly one of them is wrong.
 - Expect roughly one blocked task in five. Blocked is a result, not a failure — the reason is recorded
   and the next session can pick it up.
 - Build directories grow fast. A Rust workspace per worktree can reach tens of gigabytes; `./kit check`
