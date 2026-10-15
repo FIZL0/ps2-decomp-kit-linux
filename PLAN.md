@@ -93,8 +93,9 @@ Keep this current. It exists so nobody greps the repo to find where something li
   `decomp.py` read the dumps one function at a time
 - live: `pine.py` PCSX2 memory · `pad.py` virtual controller · `emu.py` launch/stop/screenshot/states ·
   `probe.py` find addresses · `record.py` declarative captures
-- workflow: `plan.py` · `journal.py` · `checks.py` · `runner.py` unattended runs · `oracle.py` ·
-  `setup.py` setup and doctor · `hooks/` the context guards
+- workflow: `plan.py` · `journal.py` · `checks.py` the test gate, the audit and the commit (it runs
+  `[build] test`, or the kit's own suites in a kit checkout) · `runner.py` unattended runs ·
+  `oracle.py` · `setup.py` setup and doctor · `hooks/` the context guards
 
 `watch/` — capture specs (`*.toml`), one per thing you record. `research/` — your own scripts and notes,
 committed, no game data. `context/` — everything game-derived, git-ignored.
