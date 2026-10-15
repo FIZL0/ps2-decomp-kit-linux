@@ -91,7 +91,21 @@ takes out the user's own session, and in a parallel run the other agents' copies
 
 **The emulator runs but the game is at the BIOS screen**
 No BIOS, or the wrong path. `./kit doctor` checks the BIOS folder for your OS; the paths are in
-`SETUP.md`. The BIOS has to be your own dump.
+`SETUP.md`. The BIOS has to be your own dump. `./kit pcsx2 start` refuses outright when that folder holds
+no image, rather than starting an emulator that can boot nothing, and it names the BIOS it picked in its
+own output — a config with `[Filenames] BIOS` empty is the common version of this.
+
+**The emulator runs and the screenshot shows PCSX2's setup wizard**
+That config has never been through the first-run wizard, so `pcsx2-qt -- <iso>` opens the wizard and
+ignores the disc entirely. `./kit pcsx2 start` now writes `[UI] SetupWizardIncomplete = false` on every
+launch, so this should not recur; if you see it, you are launching PCSX2 some other way.
+(`pcsx2-qt -testconfig` writes a default ini without a GUI, but does *not* clear that flag.)
+
+**Frame counts disagree with the retail game by a constant ratio**
+Check the BIOS region against the disc's: `./kit doctor` prints both, and warns when they differ. A PAL
+BIOS boots an NTSC disc perfectly well and runs the machine at 50 Hz, so every measurement taken against
+it is off by 50/60 and nothing looks broken. The kit prefers a region-matching BIOS for its own copies
+and leaves your own configuration alone with a note.
 
 ---
 
@@ -136,6 +150,13 @@ KERNEL=="uinput", MODE="0660", GROUP="input", OPTIONS+="static_node=uinput"
 `./kit pad serve` must stay running — the device disappears when it exits. Start it before the emulator,
 then map it as controller 1 in the emulator's controller settings. With several copies, each needs its own
 pad pinned by the SDL device filter, which `KIT_PCSX2` arranges.
+
+**`./kit pad` reports success and the game does not react**
+Controller port 1 in that emulator's ini is bound to something else — commonly the keyboard, if that is
+how you play, which a kit copy then switches off. Everything else keeps working, which is what makes this
+expensive: the device exists, `send` succeeds, `./kit shot` is fine because it names the pad explicitly,
+and the game receives nothing. `./kit pad check` reads the ini and says which sources port 1 is bound to;
+`./kit pcsx2 copy N` rebinds port 1 to the kit pad for copy N.
 
 **Pressing buttons triggers save states and turbo**
 You sent `select`. PCSX2's hotkeys are Select plus a shoulder button. `./kit pad` refuses `select`; if you
