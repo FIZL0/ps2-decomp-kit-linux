@@ -33,6 +33,10 @@ __pycache__/
 .venv/
 venv/
 
+# Agent worktrees. `./kit run` and Claude Code give each agent its own checkout under here;
+# they are git worktrees, not source, and committing one would commit a copy of the repo.
+/.claude/worktrees/
+
 # Editors and operating systems
 .DS_Store
 Thumbs.db
