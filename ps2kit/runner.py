@@ -154,6 +154,9 @@ def plan_text(branch: str) -> list[str]:
 
 # --- picking the next task -----------------------------------------------------
 
+ONLY: set[str] = set()  # --only: run just these tasks, then stop
+
+
 def tasks(branch: str) -> list[tuple[str, str, set[str]]]:
     """Open tasks in plan/TODO.md order: (id, section, files named on the line)."""
     from ps2kit import plan as P
@@ -168,6 +171,8 @@ def tasks(branch: str) -> list[tuple[str, str, set[str]]]:
         if not m or section.startswith('Stretch') or 'split into' in l:
             continue
         tid, rest = m.group(1), m.group(2)
+        if ONLY and tid not in ONLY:
+            continue
         # a parent whose own subtasks are open: those run instead of it
         if any(o != tid and o.startswith(tid) and o[len(tid)].isdigit() != tid[-1].isdigit()
                for o in open_ids):
@@ -265,14 +270,20 @@ def pane(name: str, cwd: Path, cmd: str, env=()) -> int:
 
 # --- starting a session --------------------------------------------------------
 
-def agent_cmd(prompt: str, sid: str, model: str, idle: int) -> str:
-    """The agent command line for one task. The Stop hook is this very module in --stop-hook mode."""
+def agent_cmd(prompt: str, sid: str, model: str, idle: int, n: int = 1) -> str:
+    """The agent command line for one task. The Stop hook is this very module in --stop-hook mode.
+
+    The prompt goes through a file, not argv: tmux refuses a command over ~16 KB, and one long brief
+    (a task file plus its journal) passes that and crashes the runner on start.
+    """
+    pf = cfg(False).ctx(f'notes/slot{n}.prompt')
+    pf.write_text(prompt, encoding='utf-8')
     stop = [{'hooks': [{'type': 'command',
                         'command': f'python3 {Path(__file__).resolve()} --stop-hook --idle {idle}'}]}]
     lean = [] if os.environ.get('KIT_LEAN') == '0' else \
         ['--tools', 'Bash,Read,Edit,Write', '--setting-sources', 'project,local', '--strict-mcp-config']
     cli = os.environ.get('KIT_AGENT', 'claude')
-    return shlex.join([cli, prompt, '--session-id', sid, '--permission-mode', 'bypassPermissions',
+    return f'{shlex.quote(cli)} "$(cat {shlex.quote(str(pf))})" ' + shlex.join(['--session-id', sid, '--permission-mode', 'bypassPermissions',
                        '--disallowedTools', 'AskUserQuestion', '--model', model, *lean,
                        '--settings', json.dumps({'hooks': {'Stop': stop, 'StopFailure': stop}})])
 
@@ -314,7 +325,7 @@ def start(n: int, task, branch: str, model: str, idle: int, slots: int):
     with open(logfile, 'a', encoding='utf-8') as f:
         f.write(f'\n=== {dt.datetime.now().isoformat(timespec="seconds")} {tid} session {sid}\n')
     env = [f'KIT_PCSX2={n}', 'KIT_RUN=1', f'KIT_CHECK_SLOTS={os.environ.get("KIT_CHECK_SLOTS", max(2, min(slots, 3)))}']
-    pid = pane(f's{n}', d, agent_cmd(prompt, sid, model, idle), env)
+    pid = pane(f's{n}', d, agent_cmd(prompt, sid, model, idle, n), env)
     log(f'slot {n}: {tid} ({task[1]}; {", ".join(sorted(task[2])) or "no files listed"})')
     return pid, sid, since
 
@@ -792,10 +803,13 @@ def cmd_run(argv: list[str]) -> int:
     ap.add_argument('--pause', type=int, default=60, help='seconds between a session ending and the next (60)')
     ap.add_argument('--model', default=os.environ.get('KIT_MODEL', 'opus'), help='the agent model (opus)')
     ap.add_argument('--no-tmux', action='store_true', help='force the single sequential session')
+    ap.add_argument('--only', nargs='+', metavar='ID', default=[],
+                    help='run just these tasks (each still waits for its subtasks and (after …) tasks), then stop')
     ap.add_argument('--stop-hook', action='store_true', help=argparse.SUPPRESS)
     ap.add_argument('--stop-waiter', nargs=4, metavar=('PID', 'TRANSCRIPT', 'N', 'IDLE'),
                     help=argparse.SUPPRESS)
     a = ap.parse_args(argv)
+    ONLY.update(a.only)
 
     once = str(a.slots) == 'once'
     if once:
