@@ -105,7 +105,7 @@ here is a legal opinion, but the usual mitigation is cheap with agents: split th
    `--spec` again, and a spec session answers it.
 
 `./kit audit` refuses a `SPEC.md` with an address, offset or decompiler name in it, and any note with a
-pasted line of decompiled C. The runner does not count a `--spec` ending as the night's attempt, so the
+pasted line of decompiled C. The runner does not count a `--spec` ending as its attempt at the task, so the
 port phase can run once the spec is merged. In the main checkout the lock is not written (another session
 may be researching there): the brief's *Port phase* is the rule, nothing enforces it.
 
@@ -183,45 +183,36 @@ sitting with fresh context, and that is deliberate.
 
 ```sh
 ./kit run once                 # one task, then stop
-./kit run 3                    # three at a time, each in its own git worktree
-./kit run 3 --mode d           # ... picking tasks that touch different files
+./kit run 3                    # three at a time, each in its own git worktree (mode d: different files)
+./kit run 3 --mode p           # ... strictly in TODO.md order, files may overlap
+./kit run --dry-run 3          # what would start now, and why the rest wait
+./kit stop                     # running tasks finish and merge, nothing new starts
 ```
 
-What to expect from a long run:
+The loop is [agent-runner](https://github.com/FIZL0/agent-runner) (install: SETUP.md step 1); its README
+covers picking, merging and the idle Stop hook. The kit's settings for it are in `ps2kit/runner.toml`; a
+`[agent-runner]` table in `kit.toml` overrides them. What to expect:
 
-- It never exits on its own (only `once` does): with nothing it may start it logs `run idle: ...` and keeps
-  re-reading `plan/TODO.md` on the shared branch, starting new tasks as soon as they are committed
-  (`run busy: ...`). A task it already tried comes back when a human unblocks it. Type `s` + Enter in its pane to stop it gently: nothing new
-  starts, the running tasks finish and merge, then it ends (`s` again undoes it). Ctrl-C stops it at once. **A
-  script waiting on a run must watch for `run idle` in the log, never for the process to exit**, or it
-  waits forever.
-- It needs `tmux` and `git worktree`. Without tmux (or with `N` of 1, or `--no-tmux`) it degrades to one
-  sequential session in the current checkout and says so.
-- Each agent works on `task/<ID>` in its own worktree, with its own build directory, so three can run
-  tests at once. Merge them afterwards; conflicts are rare if tasks were picked for different files.
-- The conflicts that do happen are mostly two agents appending to the same list, so the run joins those
-  itself and says which files it joined: the task list and its archive, the journal, and the oracle's
-  address list — files where a line is a whole record and both sides' records belong. Anything else it
-  hands to a session of its own (the bullet below), with the branch and the target untouched until that
-  session has finished the merge.
-  Prose is on the "hands over" side on purpose, including `PLAN.md`'s code map: joining two reflowed
-  paragraphs line by line produces something that reads like a sentence and is not one. So is the
-  address list when the two sides give one name different addresses — the whole point of joining is
-  that both sides belong, and there exactly one of them is wrong.
-- Expect roughly one blocked task in five. Blocked is a result, not a failure — the reason is recorded
-  and the next session can pick it up.
-- Build directories grow fast. A Rust workspace per worktree can reach tens of gigabytes; `./kit check`
-  cleans the oldest when the total passes its cap, and the cap is in `kit.toml`.
-- Afterwards: `./kit plan` to see what moved, `git log --oneline` per branch, then merge. Read the
-  journal entries before the diffs — they tell you which commits to trust.
-- A conflict the runner cannot join mechanically does not come to you: it gets a Claude session of its
-  own, in the main checkout, which reads both sides and finishes the merge. The runner then runs the
-  tests and pushes as usual. A session that cannot resolve it honestly aborts the merge and says why,
-  and *that* is what lands in your lap — with the transcript in `context/notes/fixer.log` and one line
-  per merge in `context/notes/master.md`. `[run] fix_merges = false` turns it off.
-- Every merge that passes the tests is pushed, and the merged `task/<ID>` is dropped from the remote, so
-  `git ls-remote --heads origin` is the list of branches whose merge did not land. `[git] push_merge =
-  false` keeps the merge local until you have read it, and logs the `git push` to run.
+- It runs until stopped (only `once` exits by itself). With nothing to start it logs `run idle` and keeps
+  re-reading `plan/TODO.md` on the shared branch. A script waiting on a run watches the log
+  (`context/notes/run.log`) for `run idle`, not for the process to exit. `./kit stop`, or `s` + Enter in
+  its pane, stops it gently; Ctrl-C stops it at once.
+- It needs `tmux` and `git worktree`. Without tmux (or with `N` of 1, or `--no-tmux`) it runs one
+  sequential session in the current checkout.
+- Each agent works on `task/<ID>` in its own worktree and build directory, with its own emulator copy
+  (`KIT_PCSX2=N`), closed when the session ends. The runner merges each finished branch, runs `./kit
+  check` on the merge and pushes it.
+- Conflicts in files where a line is a whole record (the task list, the journal, the oracle's address
+  list) are joined mechanically; the address list refuses a name given two different addresses. Any other
+  conflict goes to an agent session in the main checkout (transcript in `context/notes/fixer.log`); one it
+  cannot resolve is left for you, with the reason in `context/notes/ledger.md`. `[run] fix_merges = false`
+  turns the sessions off.
+- Blocked is a result, not a failure: the reason is recorded and the next session can pick it up. A block
+  with `--after X` reopens when X lands.
+- Build directories grow fast. `./kit check` cleans the oldest when the total passes the cap in `kit.toml`.
+- Afterwards: `./kit plan` to see what moved, and read the journal entries before the diffs.
+- The merged `task/<ID>` is dropped from the remote, so `git ls-remote --heads origin` lists the branches
+  whose merge did not land. `[git] push_merge = false` keeps merges local until you have read them.
 
 If you run more than one emulator copy, each agent needs its own: `KIT_PCSX2=2` gives it its own config
 directory, its own PINE slot, its own pad and its own lock, so two agents cannot drive the same window.

@@ -503,7 +503,7 @@ def push(cwd: Path, branch: str) -> str:
 
     Any branch, the shared one included: finished work goes out, because work that exists only on this
     disk is work one failed disk from gone. A `./kit run` pushes the merge target only once the merge has
-    passed the test gate (see `runner.merge`), which is the gate that makes publishing it safe to do
+    passed the test gate (agent-runner tests every merge), which is the gate that makes publishing it safe to do
     unattended; a wrap-up pushes what it just committed.
 
     Returns one line to print, or '' when there is nothing to say: pushing is off, or this repo has no
@@ -579,7 +579,7 @@ def cmd_done(argv: list[str]) -> int:
                     help='commit even though the address audit found something (say why in the journal)')
     a = ap.parse_args(argv)
 
-    from ps2kit import plan  # function-local by design: plan.py is a leaf, so no import cycle
+    from ps2kit import plan  # function-local: it needs agent-runner, which only the plan commands do
     c = cfg(False)
     cwd = Path.cwd() if (Path.cwd() / '.git').exists() else ROOT
     if a.spec and a.blocked:

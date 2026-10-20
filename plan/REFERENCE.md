@@ -34,8 +34,8 @@ config, their own PINE slot and their own lock:
 Two rules that cost real time when broken:
 
 - **One PCSX2 per agent.** `KIT_PCSX2=N` selects copy N and every kit tool follows it — config directory,
-  PINE slot, pad, lock. `./kit run` sets it per slot. Two agents on one copy will load states into each
-  other's game and both will conclude the game is haunted.
+  PINE slot, pad, lock. `./kit run` sets it per slot. Two agents on one copy load states into each
+  other's game.
 - **Never kill PCSX2 by name.** `pkill pcsx2` takes out the other agents' copies too (and, with `-f`, often
   the caller itself — see the comment in `ps2kit/hooks/guard.py`). `./kit pcsx2 stop` ends yours.
 
@@ -91,12 +91,12 @@ task.
 ## Running a long session unattended
 
 `./kit run` keeps N agents going through `plan/TODO.md` (see `docs/WORKFLOW.md` → *Long and unattended
-runs*, and the module docstring in `ps2kit/runner.py` for the picking rules). What matters when reading the
-results in the morning:
+runs*, and [agent-runner](https://github.com/FIZL0/agent-runner)'s README for the picking rules). What
+matters when reading the results:
 
 - Each task got **one** attempt. A task that comes back blocked has a reason on its line.
 - A session that only hit the usage limit was discarded, not counted — its task is still open.
-- A branch that could not be merged is still there as `task/<ID>`, with the reason in `context/notes/run.log`.
+- A branch that could not be merged is still there as `task/<ID>`, with the reason in `context/notes/run.log` and `context/notes/ledger.md`.
 - `context/notes/slotN.log` is slot N's session output; `./kit plan` shows what landed.
 
 The hooks in `.claude/settings.json` are what keep those sessions cheap: `ps2kit/hooks/guard.py` refuses the
