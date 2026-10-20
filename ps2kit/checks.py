@@ -569,6 +569,9 @@ def cmd_done(argv: list[str]) -> int:
     ap.add_argument('message', metavar='MSG', help='the commit message')
     ap.add_argument('--blocked', metavar='WHY',
                     help='mark the task [~] instead of done: why, and what would unblock it')
+    ap.add_argument('--after', metavar='IDS', default=None,
+                    help='with --blocked: the tasks it waits on, comma-separated; a run reopens it once they '
+                         'are all done (left out, they are read off WHY)')
     ap.add_argument('--spec', action='store_true',
                     help="a clean-room spec phase (docs/WORKFLOW.md): audit and commit the task's SPEC.md as "
                          '"<ID> spec: <MSG>", no tests and no tick, so the task stays open for its port phase')
@@ -615,7 +618,7 @@ def cmd_done(argv: list[str]) -> int:
     if a.spec:
         a.message = f'{a.id} spec: {a.message}'
     elif a.blocked:
-        plan.block(a.id, a.blocked)
+        plan.block(a.id, a.blocked, after=None if a.after is None else [t for t in a.after.split(',') if t])
         print(f'blocked {a.id}')
     else:
         plan.tick(a.id)

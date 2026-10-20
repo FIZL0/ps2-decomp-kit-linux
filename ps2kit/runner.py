@@ -13,9 +13,17 @@ already pasted into the first turn, waits for it to finish, merges the branch, a
 
 What it has to get right, and why each of these is here rather than left to the agent:
 
+**A block that waits on a task reopens itself.** `./kit done --blocked WHY` records the open task ids WHY
+names (or `--after X,Y`) as `BLOCKED: (after X, Y)`, and every landed merge runs `plan.reopen`, which puts
+each task whose list is all done back to `[ ]`, commits that with the merge (so it is pushed with it) and
+lets this run try the task again. Without it a task blocked on "X is not merged yet" stays blocked until a
+human reads the prose — five did, through the very merges that freed them, in one port's run.
+
 **Task picking** goes down `plan/TODO.md` in order and skips: blocked tasks (`[~]`), split parents (a task
-whose own subtasks are open or blocked), tasks whose `(after X)` dependency is still open, the `### Stretch` section,
-anything already tried this run, and anything whose branch is finished and waiting to be merged. Siblings
+whose own subtasks are open or blocked), tasks with any `(after X, Y)` dependency still open, tasks whose line
+names a task that is running right now (prose like "X's menu" is a dependency nobody wrote down as one), the
+`### Stretch` section, anything already tried this run, and anything whose branch is finished and waiting to
+be merged. Siblings
 (`L3a`, `L3b` — same prefix+number) never run at once in any mode, because they are the same code by
 definition. Mode `d` additionally keeps two running tasks off the same files, which are named on each task's
 line; mode `p` ignores that and just follows priority order.
@@ -103,7 +111,9 @@ nobody will find.
 
 Finish with `./kit done {tid} "<commit message>"`. If you are stuck (a tool hangs, the same fix fails twice,
 it needs the human, ~20 minutes with no progress): commit what is solid and `./kit done {tid} "<msg>"
---blocked "<why + what would unblock it>"`, then stop. A usage limit is not stuck: commit what is solid, do
+--blocked "<why + what would unblock it>"`, then stop. If all it waits on is another task landing (its
+code is not on the branch yet), add `--after <ID>[,<ID>]`: the run reopens it the moment those merge,
+instead of leaving it for a human. A usage limit is not stuck: commit what is solid, do
 not block the task and do not stop the emulator — the session waits for the reset and carries on.
 
 Its brief (`./kit plan brief {tid}`) follows, so don't gather it again.
@@ -162,12 +172,13 @@ def plan_text(branch: str) -> list[str]:
 ONLY: set[str] = set()  # --only: run just these tasks, then stop
 
 
-def tasks(branch: str) -> list[tuple[str, str, set[str]]]:
-    """Open tasks in plan/TODO.md order: (id, section, files named on the line)."""
+def tasks(branch: str) -> list[tuple[str, str, set[str], set[str]]]:
+    """Open tasks in plan/TODO.md order: (id, section, files named on the line, task ids named on it)."""
     from ps2kit import plan as P
     ls = plan_text(branch)
     # [ ] and [~] (blocked) both count as not done: a split parent runs only once its subtasks are all ticked
     open_ids = {m.group(1) for l in ls if (m := ANY_TASK.match(l)) and not l.startswith('- [x]')}
+    every = {m.group(1) for l in ls if (m := ANY_TASK.match(l))}
     out, section = [], ''
     for l in ls:
         if l.startswith('### '):
@@ -183,10 +194,12 @@ def tasks(branch: str) -> list[tuple[str, str, set[str]]]:
         if any(o != tid and o.startswith(tid) and o[len(tid)].isdigit() != tid[-1].isdigit()
                for o in open_ids):
             continue
-        after = re.search(r'\(after (\S+?)\)', l)
-        if after and after.group(1).rstrip(')') in open_ids:
+        # `(after X, Y, Z)` is every one of them: a one-id pattern reads that as no dependency at all, and the
+        # task starts before X has, only to block itself on it
+        if any(set(P.TASK_ID.findall(a)) & (open_ids - {tid}) for a in re.findall(r'\(after ([^)]*)\)', l)):
             continue
-        out.append((tid, section, set(P.files_on_line(rest))))
+        named = set(P.TASK_ID.findall(rest)) & every - {tid}
+        out.append((tid, section, set(P.files_on_line(rest)), named))
     return out
 
 
@@ -202,19 +215,22 @@ def pick(running: dict, tried: set, mode: str, branch: str):
     # A section whose heading says its tasks are ordered ("Next (in this order)") runs one task at a time:
     # its second task usually depends on the first having landed, whatever the files say.
     busy_sections = {b[1] for b in busy}
-    for tid, section, files in tasks(branch):
+    busy_ids = {b[0] for b in busy}
+    for tid, section, files, named in tasks(branch):
         if all(tid != b[0] for b in busy) and git('rev-list', '-1', f'{branch}..task/{tid}').stdout.strip():
             continue  # finished, its branch is waiting to be merged: restarting it would reset the branch
         if any(family(tid) == family(b[0]) for b in busy):
             continue
         if tid in tried or any(tid == b[0] for b in busy):
             continue
+        if named & busy_ids:
+            continue  # its line names a task that is running now: it is built on that, so it waits for it
         if mode == 'p':
-            return tid, section, files
+            return tid, section, files, named
         if (section.startswith('Next') or 'in this order' in section) and section in busy_sections:
             continue
         if all(not (files & b[2]) for b in busy):
-            return tid, section, files
+            return tid, section, files, named
     return None
 
 
@@ -640,6 +656,7 @@ def _merge(tids: list[str], branch: str, d: Path) -> tuple[str | None, list[str]
         if why:
             return why, []
         break
+    reopen_landed(branch, ' '.join(tids))  # before the push, so the reopen goes out with the merge
     for t in tids:
         git('branch', '-d', f'task/{t}')
         line = next((l for l in plan_text(branch) if f'**{t}**' in l), '')
@@ -664,6 +681,31 @@ def _merge(tids: list[str], branch: str, d: Path) -> tuple[str | None, list[str]
         if out := drop_if_merged(ROOT, f'task/{t}'):
             log(f'{t}: {out}')
     return None, tids
+
+
+REOPENED: set[str] = set()  # tasks `reopen_landed` put back to [ ]: `cmd_run` lets them be tried again
+
+
+def reopen_landed(branch: str, why: str) -> None:
+    """Unblock what a merge freed (`plan.reopen`) and commit it, in the main checkout, holding MERGE.
+
+    Left alone when TODO.md has edits nobody committed — somebody mid-edit — so it never commits theirs; the
+    next merge tries again.
+    """
+    from ps2kit import plan as P
+    todo = Path(cfg(False).plan) / 'TODO.md'
+    rel = os.path.relpath(todo, ROOT)
+    if git('branch', '--show-current').stdout.strip() != branch or git('status', '--porcelain', '--', rel).stdout.strip():
+        return
+    if not (got := P.reopen(todo)):
+        return
+    names = ', '.join(t for t, _ in got)
+    if git('commit', '-qm', f'Plan: reopen {names} ({why} landed what they waited on)', '--', rel).returncode:
+        git('checkout', '-q', '--', rel)
+        return
+    REOPENED.update(t for t, _ in got)
+    for t, ids in got:
+        log(f'{t}: reopened, {", ".join(ids)} landed')
 
 
 def land(tids: list[str], branch: str, merged: str) -> str | None:
@@ -896,6 +938,10 @@ def sequential(branch: str, model: str, idle: int, pause: int, force: bool, once
             continue
         if not spec_only(tid, ROOT):
             tried.add(tid)
+        with MERGE:  # here a task commits straight onto the branch: that is its merge
+            reopen_landed(branch, tid)
+        tried -= REOPENED
+        REOPENED.clear()
         if once:
             log(f'{tid}: done (--once)')
             return 0
@@ -987,6 +1033,8 @@ def cmd_run(argv: list[str]) -> int:
             t = threading.Thread(target=finish, args=(tid, 0, '(unknown)', branch))
             t.start()
             merging.append(t)
+    with MERGE:  # blocks freed by merges made while no run was up
+        reopen_landed(branch, 'a merge before this run')
     for n in free_at:  # idle slots must let go of old task/<ID> branches, or start() cannot take them
         if (SLOTS_DIR / f's{n}').is_dir():
             git('checkout', '-q', '--detach', cwd=SLOTS_DIR / f's{n}')
@@ -1030,6 +1078,9 @@ def cmd_run(argv: list[str]) -> int:
                         procs[n], running[n] = p, task
                     else:
                         tried.add(task[0])
+        if REOPENED:
+            tried -= REOPENED  # a task reopened by a merge is a new attempt, not the one that blocked
+            REOPENED.clear()
         merging = [t for t in merging if t.is_alive()]
         if not procs and not merging and not pick(running, tried, a.mode, branch) \
                 and all(dt.datetime.now() >= t for t in free_at.values()):

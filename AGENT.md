@@ -119,7 +119,8 @@ Never loop on one obstacle. If a tool hangs, the emulator will not cooperate, th
 something genuinely needs the human, or about twenty minutes pass with no progress:
 
 1. write what happened and what you tried in the task's journal entry,
-2. `./kit done <ID> "<what is solid>" --blocked "<why + what would unblock it>"`,
+2. `./kit done <ID> "<what is solid>" --blocked "<why + what would unblock it>"` — and when all it waits on
+   is another task landing, add `--after <ID>[,<ID>]`: the task reopens by itself once those are done,
 3. start the next open task — preferably in a different area.
 
 "The emulator is not running" is not a blocker; start it. A usage limit is not a blocker either; commit

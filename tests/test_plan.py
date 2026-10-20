@@ -493,6 +493,32 @@ def test_inbox():
 
 # --- the runner's task picking ------------------------------------------------
 
+def test_plan_reopen():
+    print('plan: a block that waits on a task reopens when that task is done')
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp) / 'plan'
+        todo, done = plan.ensure(d / 'TODO.md', d / 'DONE.md')
+        kw = dict(todo=todo, done=done)
+        for text in ('the menu → menu.rs', 'the garage → garage.rs', 'the lobby → lobby.rs', 'a capture → c.csv'):
+            plan.add('P', text, **kw)
+        plan.block('P2', "needs P1's menu (in flight) and V22's split, done long ago", todo=todo)
+        has(Path(todo).read_text(), r'\*\*P2\*\*.* BLOCKED: \(after P1\) needs',
+            'block reads the open ids off WHY, and leaves the done or unknown ones out')
+        plan.block('P3', 'waits on two', todo=todo, after=['P1', 'P2'])
+        plan.block('P4', 'needs a human with a pad (P1 is unrelated)', todo=todo, after=[])
+        has(Path(todo).read_text(), r'\*\*P4\*\*.* BLOCKED: needs a human', 'after=[] records no dependency')
+        eq(plan.reopen(todo), [], 'nothing reopens while what it waits on is open')
+        plan.tick('P1', **kw)
+        eq(plan.reopen(todo), [('P2', ['P1'])], 'a block whose tasks are all done reopens')
+        text = Path(todo).read_text()
+        has(text, r'^- \[ \] \*\*P2\*\*.*reopened: P1 landed$', 'as [ ], its BLOCKED gone, and says why')
+        has(text, r'^- \[~\] \*\*P3\*\*', 'one that also waits on a reopened task stays blocked')
+        plan.tick('P2', **kw)
+        eq([t for t, _ in plan.reopen(todo)], ['P3'], 'and reopens once the last of its list is done')
+        has(Path(todo).read_text(), r'^- \[~\] \*\*P4\*\*', 'a block that names no task is never reopened')
+        eq(plan.reopen(todo), [], 'reopen is idempotent')
+
+
 def test_runner_picking():
     print('run: which task a free slot may take')
     from ps2kit import runner as R
@@ -520,6 +546,16 @@ def test_runner_picking():
     try:
         eq([t[0] for t in R.tasks('main')], ['A1', 'C3', 'D4a'],
            'a split parent runs once its subtasks are ticked, waits on blocked ones, and "split into" in prose is no parent')
+    finally:
+        R.plan_text = real
+    R.plan_text = lambda b: ['### Phase 1', '- [ ] **E1** the menu', '- [ ] **E2** the garage',
+                             '- [ ] **F1** the lobby (after E1, E2)', "- [ ] **G1** the pause, over E1's menu",
+                             '- [ ] **H1** (after E9) a done task']
+    try:
+        eq([t[0] for t in R.tasks('main')], ['E1', 'E2', 'G1', 'H1'],
+           '(after X, Y) waits on every id, and one that is done is no wait')
+        busy = {1: next(t for t in R.tasks('main') if t[0] == 'E1')}
+        eq(R.pick(busy, set(), 'd', 'main')[0], 'E2', 'a task whose line names a running task waits for it')
     finally:
         R.plan_text = real
 
@@ -767,7 +803,7 @@ def test_cli_help():
 
 
 def main() -> int:
-    for t in (test_plan_roundtrip, test_plan_index_and_sections, test_brief, test_shipped_backlog,
+    for t in (test_plan_roundtrip, test_plan_reopen, test_plan_index_and_sections, test_brief, test_shipped_backlog,
               test_atomic_write, test_journal, test_check_summary, test_self_test_gate, test_audit,
               test_guard,
               test_inbox, test_runner_picking, test_runner_union, test_runner_fixer, test_runner_merge,
