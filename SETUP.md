@@ -45,7 +45,7 @@ Reading the disc, the ELFs and the decompilation runs on a stock Python with no 
 that runs `./kit`:
 
 ```sh
-pip install --user git+https://github.com/FIZL0/agent-runner@v0.2.0
+pip install --user git+https://github.com/FIZL0/agent-runner@v0.3.0
 ```
 
 On a distribution that refuses `pip install --user` (externally managed Python), make a venv

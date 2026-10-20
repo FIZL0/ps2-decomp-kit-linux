@@ -115,16 +115,11 @@ def cmd_run(argv: list[str]) -> int:
     if CONFIG.exists():
         os.environ.setdefault('KIT_CONFIG', str(CONFIG))  # kit.toml is git-ignored: slots read the main one
     R.PROMPT = R.PROMPT.replace('{journal}', JOURNAL)
-    return R.cmd_run(argv)
+    return R.cmd_run(argv, prog='./kit run')
 
 
 def cmd_stop(argv: list[str]) -> int:
-    if argv:  # agent-runner's stop takes no arguments and would stop on any
-        from ps2kit.cli import parser
-        parser('stop', 'Ask the running `./kit run` to stop: the running tasks finish and merge, nothing new '
-                       'starts, then it exits. `s` + Enter in the runner\'s pane does the same.').parse_args(argv)
-        return 2
     from agent_runner import runner as R
     os.chdir(ROOT)
     use()
-    return R.cmd_stop(argv)
+    return R.cmd_stop(argv, prog='./kit stop')
