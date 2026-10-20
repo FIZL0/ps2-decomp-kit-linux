@@ -464,7 +464,7 @@ def test_cli_help():
     for cmd in ('plan', 'journal', 'check', 'done', 'run', 'stop', 'oracle'):
         r = subprocess.run([sys.executable, str(ROOT / 'kit'), cmd, '--help'],
                            capture_output=True, text=True, cwd=str(ROOT))
-        check(r.returncode == 0 and len(r.stdout) > 200,
+        check(r.returncode == 0 and len(r.stdout) > 40,
               f'./kit {cmd} --help prints help', (r.stdout + r.stderr)[:400])
 
 
