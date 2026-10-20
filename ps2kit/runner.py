@@ -11,6 +11,16 @@ already pasted into the first turn, waits for it to finish, merges the branch, a
     ./kit run 1               one at a time (the sequential run; also what you get without tmux)
     ./kit run --force         keep starting tasks past the weekly usage cap
 
+**It stays up.** Every form but `once` runs until Ctrl-C. With nothing it may start it logs `run idle: ...`
+once and keeps re-reading plan/TODO.md on the shared branch, starting what is committed there later
+(`run busy: ...`). A script waiting on a run watches the log for `run idle`, never for the process to exit,
+or it waits forever. A task it already tried that closed (`[~]`) and was opened again by hand is back in the
+pool, the same as one a merge reopens.
+
+**`s` + Enter in the runner's pane stops it gently**: nothing new starts, the running tasks finish and
+merge, and then the run ends (`run stopped`). `s` again takes it back. The way to end a run without
+cutting a session off mid-task, which Ctrl-C does.
+
 What it has to get right, and why each of these is here rather than left to the agent:
 
 **A block that waits on a task reopens itself.** `./kit done --blocked WHY` records the open task ids WHY
@@ -683,7 +693,30 @@ def _merge(tids: list[str], branch: str, d: Path) -> tuple[str | None, list[str]
     return None, tids
 
 
+KEYS: list[str] = []  # lines typed into the runner's pane; a thread reads them, as select() on stdin is POSIX-only
+
+
+def read_keys() -> None:
+    for line in sys.stdin:
+        KEYS.append(line.strip().lower())
+
+
 REOPENED: set[str] = set()  # tasks `reopen_landed` put back to [ ]: `cmd_run` lets them be tried again
+BOX = re.compile(r'^- \[(.)\] \*\*([^*\s]+)\*\*')
+
+
+def retry_reopened(tried: set[str], closed: set[str], branch: str) -> None:
+    """A tried task whose line closed and then opened again (a human unblocked it) may be tried again."""
+    if not tried:
+        return
+    box = {m.group(2): m.group(1) for l in plan_text(branch) if (m := BOX.match(l))}
+    for t in list(tried):
+        if box.get(t) != ' ':
+            closed.add(t)
+        elif t in closed:
+            tried.discard(t)
+            closed.discard(t)
+            log(f'{t}: open again since it was tried; back in the pool')
 
 
 def reopen_landed(branch: str, why: str) -> None:
@@ -920,7 +953,19 @@ def sequential(branch: str, model: str, idle: int, pause: int, force: bool, once
     log(f'sequential run on {branch} ({"one task, then stop" if once else "one session at a time"}, '
         f'committing in this checkout)')
     tried: set[str] = set()
-    while (task := pick({}, tried, 'p', branch)):
+    closed: set[str] = set()
+    idle_said = False
+    while True:
+        retry_reopened(tried, closed, branch)
+        if not (task := pick({}, tried, 'p', branch)):
+            if not idle_said:
+                log('run idle: no task it may start; waiting for plan/TODO.md to change (Ctrl-C to stop)')
+                idle_said = True
+            time.sleep(30)
+            continue
+        if idle_said:
+            log('run busy: new work')
+            idle_said = False
         if not force and (w := weekly()) is not None and w >= WEEKLY_MAX:
             log(f'weekly usage {w}% >= {WEEKLY_MAX}%: waiting for the reset (--force to go on)')
             time.sleep(300)
@@ -946,8 +991,6 @@ def sequential(branch: str, model: str, idle: int, pause: int, force: bool, once
             log(f'{tid}: done (--once)')
             return 0
         time.sleep(pause)
-    log('sequential run done: no task left that it may start')
-    return 0
 
 
 # --- the loop ------------------------------------------------------------------
@@ -1016,6 +1059,10 @@ def cmd_run(argv: list[str]) -> int:
     merging: list[threading.Thread] = []
     stall_said: set[str] = set()
     cap_said = False
+    closed: set[str] = set()
+    idle_said = False
+    stopping = False  # `s` typed: start nothing new, end once the running ones are merged
+    threading.Thread(target=read_keys, daemon=True).start()
     log(f'run: {a.slots} slots, mode {a.mode}, merging into {branch}'
         + (f', weekly usage {weekly()}%' if not a.force else ' (weekly cap ignored)'))
 
@@ -1065,7 +1112,7 @@ def cmd_run(argv: list[str]) -> int:
                 stall_said.add(procs[n][1])
                 log(f'slot {n}: {running[n][0]} looks stalled ({why}); attach to pane s{n} to see')
                 print('\a', end='', flush=True)
-            if n not in procs and dt.datetime.now() >= free_at[n]:
+            if not stopping and n not in procs and dt.datetime.now() >= free_at[n]:
                 if not a.force and (w := weekly()) is not None and w >= WEEKLY_MAX:
                     if not cap_said:
                         log(f'weekly usage {w}% >= {WEEKLY_MAX}%: no new tasks until it resets '
@@ -1076,16 +1123,29 @@ def cmd_run(argv: list[str]) -> int:
                 if task := pick(running, tried, a.mode, branch):
                     if p := start(n, task, branch, a.model, a.idle, a.slots):
                         procs[n], running[n] = p, task
+                        if idle_said:
+                            log(f'run busy: new work ({task[0]})')
+                            idle_said = False
                     else:
                         tried.add(task[0])
+        retry_reopened(tried, closed, branch)
         if REOPENED:
             tried -= REOPENED  # a task reopened by a merge is a new attempt, not the one that blocked
             REOPENED.clear()
         merging = [t for t in merging if t.is_alive()]
-        if not procs and not merging and not pick(running, tried, a.mode, branch) \
-                and all(dt.datetime.now() >= t for t in free_at.values()):
-            log(f'run done; tried this run: {", ".join(sorted(tried)) or "none"}')
+        while KEYS:
+            if KEYS.pop(0) == 's':
+                stopping = not stopping
+                log('stopping: no new tasks; the running ones finish and merge, then the run ends (s again: undo)'
+                    if stopping else 'stop taken back: starting tasks again')
+        if stopping and not procs and not merging:
+            log(f'run stopped (s); tried this run: {", ".join(sorted(tried)) or "none"}')
             return 0
+        if not idle_said and not procs and not merging and not pick(running, tried, a.mode, branch) \
+                and all(dt.datetime.now() >= t for t in free_at.values()):
+            log(f'run idle: nothing it may start (tried this run: {", ".join(sorted(tried)) or "none"}); '
+                f'waiting for plan/TODO.md to change (Ctrl-C to stop)')
+            idle_said = True
         time.sleep(10)
 
 
