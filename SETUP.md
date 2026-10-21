@@ -48,8 +48,9 @@ that runs `./kit`:
 pip install --user git+https://github.com/FIZL0/agent-runner@v0.3.0
 ```
 
-On a distribution that refuses `pip install --user` (externally managed Python), make a venv
-(`python3 -m venv .venv && . .venv/bin/activate`) and install it there, then run `./kit` from that shell.
+On a distribution that refuses `pip install --user` (externally managed Python, e.g. Arch), add
+`--break-system-packages`: agent-runner has no dependencies and installs only into `~/.local`, so it
+cannot conflict with system packages.
 `uv tool install` and `pipx` put it in an isolated environment the kit cannot import from, so they do not
 work here.
 
