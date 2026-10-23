@@ -24,7 +24,7 @@ run: it greps every committed file for the addresses in `research/oracle.txt` an
 placeholder names, because "no retail address in the port" is a rule that needs a check. A rule without
 one survives exactly as long as nobody is in a hurry.
 
-    ./kit check [extra args passed to the test command]
+    ./kit check [--all] [extra args passed to the test command]
     ./kit done <ID> "<commit message>" [--blocked "<why + what unblocks it>" | --spec] [--skip-audit]
     ./kit audit
 
@@ -62,9 +62,9 @@ CARGO_TEST_FAILED = re.compile(r'^error: (test failed, to rerun pass|\d+ targets
 
 def _slots() -> int:
     try:
-        return max(1, int(os.environ.get('KIT_CHECK_SLOTS', '2')))
+        return max(1, int(os.environ.get('KIT_CHECK_SLOTS', '3')))
     except ValueError:
-        return 2
+        return 3
 
 
 def _slot(block: bool = True):
@@ -169,13 +169,28 @@ def _log_path() -> Path:
     return cfg(False).ctx('notes/check.log')
 
 
-def _run(cmd: str, extra: list[str], cwd: Path, log: Path, env=None) -> int:
+# What the last whole-workspace run left out or reran (see ps2kit/cargo_gate.py), said under its verdict.
+NOTES: list[str] = []
+
+
+def _run(cmd: str, extra: list[str], cwd: Path, log: Path, env=None, all_slow: bool = False) -> int:
     """Run a configured command with the extra args appended, everything into `log`."""
     jobs = _jobs()
     if '{jobs}' in cmd:
         cmd = cmd.replace('{jobs}', str(jobs))
     full = cmd + (' ' + ' '.join(shlex.quote(a) for a in extra) if extra else '')
     e = _env(jobs, env)
+    from ps2kit import cargo_gate
+    NOTES.clear()
+    if cargo_gate.applies(cmd, extra):
+        remote = cfg(False).push_remote or 'origin'
+        shared = shared_name(cwd, remote)
+        ref = f'{remote}/{shared}' if not _git(cwd)('rev-parse', '-q', '--verify', f'{remote}/{shared}').returncode \
+            else shared
+        rc, notes = cargo_gate.run(cmd, cwd, e, jobs, log, ref, all_slow or os.environ.get('KIT_CHECK_ALL') == '1',
+                                   cfg(False).ctx('notes/check-times.json'))
+        NOTES.extend(notes)
+        return rc
     with open(log, 'w', encoding='utf-8') as f:
         f.write(f'$ {full}\n(cwd {cwd}, {jobs} jobs)\n\n')
         f.flush()
@@ -209,7 +224,7 @@ def summarise(rc: int, log: Path, what: str = 'TESTS') -> list[str]:
     text = log.read_text(encoding='utf-8', errors='replace') if log.exists() else ''
     if rc == 0:
         n = _passed_count(text)
-        return [f'{what} PASSED: {n} tests' if n else f'{what} PASSED']
+        return [f'{what} PASSED: {n} tests' if n else f'{what} PASSED', *[f'  ({x})' for x in NOTES]]
     errs = [l for l in text.splitlines() if cfg(False).build_error_re.search(l) and not CARGO_TEST_FAILED.match(l)]
     if errs:
         # A build failure means "you broke the code you just wrote" — a completely different next move from a
@@ -220,6 +235,7 @@ def summarise(rc: int, log: Path, what: str = 'TESTS') -> list[str]:
     # which test binary failed, as cargo says it: `kit run` reads it to rerun that one alone
     rerun = [l for l in text.splitlines() if CARGO_TEST_FAILED.match(l)]
     return [f'{what} FAILED (this is a test result, the build is fine):', *_cap(body), *rerun[:4],
+            *[f'({x})' for x in NOTES],
             f'(full log: {_rel(log)})']
 
 
@@ -255,7 +271,7 @@ def _rel(p: Path) -> str:
 # The kit's own tests: plain scripts, no framework, no kit.toml, no emulator, a few seconds all told.
 # `ps2kit/hooks/guard.py --self-test` is not a step of its own — `tests/test_plan.py` runs it.
 SELF_SUITES = ('tests/test_static.py', 'tests/test_live.py', 'tests/test_record.py',
-               'tests/test_plan.py', 'tests/test_push.py')
+               'tests/test_plan.py', 'tests/test_push.py', 'tests/test_gate.py')
 SELF_CARGO = 'cargo test --workspace -q'
 
 
@@ -317,6 +333,8 @@ def cmd_check(argv: list[str]) -> int:
                     help='passed through to [build] test, e.g. ./kit check -p sim --test flights; '
                          "in the kit's own repo, which of its suites to run (e.g. ./kit check plan cargo)")
     ap.add_argument('--no-gate', action='store_true', help='skip the concurrency gate (one-off, interactive)')
+    ap.add_argument('--all', action='store_true',
+                    help="also gate.toml's [[slow]] binaries the work did not touch (a run's merge check)")
     ap.add_argument('--rerun', action='append', default=[], metavar='ARGS',
                     help="one failed test binary as the summary's \"to rerun pass\" line gives it, one quoted "
                          "string (the run's retest of a load flake); repeatable")
@@ -344,7 +362,7 @@ def cmd_check(argv: list[str]) -> int:
     lock = None if a.no_gate else _slot()
     try:
         _cap_build_dirs(cwd)
-        rc = _run_steps(steps, cwd, log) if steps else _run(c.test_cmd, extra, cwd, log)
+        rc = _run_steps(steps, cwd, log) if steps else _run(c.test_cmd, extra, cwd, log, all_slow=a.all)
     finally:
         if lock:
             lock.release()

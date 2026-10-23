@@ -76,6 +76,10 @@ rest of the session. `docs/CONTEXT.md` explains each measure; the short version:
 - Pipe long output through `head`/`tail`/`grep`; read files by line range. Never dump a whole log.
 - `./kit check` for tests, not the raw build command — it reduces a build log to one line, and it
   distinguishes "the build broke" from "a test failed", which is the only thing you need to know.
+  While working, run only the tests you touched (`./kit check -- -p game-sim --test <name>`): a few check
+  slots serve every agent, and the full suite runs once, in `./kit done`. A whole run leaves out
+  `gate.toml`'s `[[slow]]` binaries unless your branch touches their paths, and reruns its `[flaky]` load
+  flakes alone once (see `ps2kit/cargo_gate.py`); `./kit check --all` runs everything.
   While working run only the tests you touched (`./kit check -p <crate> <filter>`): the check slots are
   shared by every agent and a full-suite run holds one for minutes. The full suite runs once, in `./kit done`.
 - `./kit plan brief <ID>` gives you a task's entire starting context in one call: its line, its own file,
