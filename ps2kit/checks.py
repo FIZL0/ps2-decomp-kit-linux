@@ -39,6 +39,7 @@ import shutil
 import subprocess
 import sys
 import time
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
 from ps2kit.config import cfg, ROOT
@@ -67,8 +68,12 @@ def _slots() -> int:
         return 3
 
 
-def _slot(block: bool = True):
+def _slot(block: bool = True, first: bool = False):
     """Take one of KIT_CHECK_SLOTS test slots, shared across the main checkout and every worktree.
+
+    `first`: the run's merge gate (`./kit check --all`). Every finished task waits on that one gate, so it
+    takes the next slot that comes free ahead of the slots' own checks, which hold off while it waits (the
+    `check-first` lock), and it runs with twice a slot's share of the cores (`_jobs`).
 
     Why a gate at all: an unattended run has N agents in N worktrees, and every one of them thinks it owns
     the machine. Five uncapped `cargo test -j$(nproc)` at once on the same box took about thirty minutes
@@ -78,26 +83,99 @@ def _slot(block: bool = True):
     spot, so each run takes a slot and is given `cores / slots` jobs.
     """
     n = _slots()
+    ahead = _check_lock('check-first', 'another merge gate, which goes first')
+    if first and not ahead.take(block=block):
+        return None
     waited = False
-    while True:
-        for i in range(n):
-            l = plat.Lock(f'check{i}')
-            # Deliberately override the path: plat.Lock() suffixes the per-agent instance (KIT_PCSX2), which
-            # is right for the emulator — each agent has its own — and wrong here, where the whole point is
-            # that every worktree on this machine queues in the *same* N slots.
-            l.path = plat.rt(f'kit-check{i}.lock')
-            if l.take(block=False):
-                return l
-        if not block:
-            return None
-        if not waited:
-            print(f'waiting: {n} test runs already going (KIT_CHECK_SLOTS={n})', file=sys.stderr, flush=True)
-            waited = True
-        time.sleep(5)
+    try:
+        while True:
+            if first or not ahead.held_by_other():
+                for i in range(n):
+                    l = _check_lock(f'check{i}')
+                    if l.take(block=False):
+                        return l
+            if not block:
+                return None
+            if not waited:
+                print(f'waiting: {n} test runs already going (KIT_CHECK_SLOTS={n})' +
+                      ('' if first or not ahead.held_by_other() else ', and a merge gate goes first'),
+                      file=sys.stderr, flush=True)
+                waited = True
+            time.sleep(5)
+    finally:
+        if first:
+            ahead.release()
+
+
+def _check_lock(name: str, note: str = '') -> plat.Lock:
+    l = plat.Lock(name, note)
+    # Deliberately override the path: plat.Lock() suffixes the per-agent instance (KIT_PCSX2), which is
+    # right for the emulator — each agent has its own — and wrong here, where the whole point is that every
+    # worktree on this machine queues in the *same* N slots.
+    l.path = plat.rt(f'kit-{name}.lock')
+    return l
+
+
+# The check slot this process holds, if it took one: `alone` gives it up and takes another after.
+_HOLD: list[plat.Lock] = []
+_FIRST = [False]  # this process is the merge gate: `_slot(first=True)`, and twice the jobs
+
+
+def _take_slot(first: bool | None = None) -> None:
+    if first is not None:
+        _FIRST[0] = first
+    _HOLD[:] = [_slot(first=_FIRST[0])]
+
+
+def _release_slot() -> None:
+    for l in _HOLD:
+        l.release()
+    _HOLD.clear()
+
+
+@contextmanager
+def alone():
+    """Every check slot at once, so a binary that times itself (gate.toml's `[alone]`) and failed gets its
+    rerun on a machine no other test run is loading — not just after this gate's own pool, while two other
+    worktrees' gates go on. Only on a failure: holding the machine stalls every other gate till theirs end.
+
+    Deadlock-free by never waiting for a lock while holding another: this process's own slot is given up
+    first; then the `check-alone` lock, which queues gates that reach this point at the same time; then
+    every slot in index order. A plain gate holds one slot and waits on nothing while it does, so each slot
+    comes free when that gate ends. After, the slots go back and this process takes one again.
+
+    A process that holds no slot (`./kit check --no-gate`) asked for no queueing, and gets none here.
+    """
+    if not _HOLD:
+        yield
+        return
+    _release_slot()
+    turn = _check_lock('check-alone', "another gate's time-budget tests")
+    taken: list[plat.Lock] = []
+    try:
+        turn.take()
+        waited = False
+        for i in range(_slots()):
+            l = _check_lock(f'check{i}')
+            if not l.take(block=False):
+                if not waited:
+                    print('waiting: the time-budget tests run with no other test run going',
+                          file=sys.stderr, flush=True)
+                    waited = True
+                l.take()
+            taken.append(l)
+        yield
+    finally:
+        for l in taken:
+            l.release()
+        turn.release()
+        _take_slot()
 
 
 def _jobs() -> int:
-    return max(1, (os.cpu_count() or 2) // _slots())
+    cores = os.cpu_count() or 2
+    share = max(1, cores // _slots())
+    return min(cores, share * 2) if _FIRST[0] and _slots() > 1 else share
 
 
 # --- the build-directory size cap ---------------------------------------------
@@ -166,7 +244,13 @@ def _du_gb(d: Path) -> float:
 # --- running and summarising ---------------------------------------------------
 
 def _log_path() -> Path:
-    return cfg(False).ctx('notes/check.log')
+    """notes/check.log, or notes/check-<worktree>.log in a worktree (s1, merge, ...): the worktrees share the
+    main checkout's context/ through a symlink, and two runs at once wrote over each other's log."""
+    log = cfg(False).ctx('notes/check.log')
+    here = Path(__file__).resolve().parent.parent
+    if here != log.resolve().parent.parent.parent:
+        log = log.with_name(f'check-{here.name}.log')
+    return log
 
 
 # What the last whole-workspace run left out or reran (see ps2kit/cargo_gate.py), said under its verdict.
@@ -174,6 +258,27 @@ NOTES: list[str] = []
 
 
 def _run(cmd: str, extra: list[str], cwd: Path, log: Path, env=None, all_slow: bool = False) -> int:
+    """`_run_shown`, with every window the tests open on a private headless display (gate.toml `[display]`)
+    instead of the desktop's compositor, and a note when that compositor's GPU memory grew over the run.
+
+    K16 (2026-10-30): Hyprland held 105 GiB of GTT after ten days of runs and the kernel OOM-killed the runner.
+    The note reads the whole desktop, so other slots' work beside this run counts in it too."""
+    from ps2kit import cargo_gate
+    d = cargo_gate.gate_config(cwd).get('display') or {}
+    before = plat.compositor_gtt_mib()
+    shown = plat.PrivateDisplay(str(d.get('size', '1920x1080'))) if d.get('private') else None
+    with shown or nullcontext({}) as denv:
+        rc = _run_shown(cmd, extra, cwd, log, {**(env or {}), **denv}, all_slow)
+    if shown and not denv:
+        NOTES.append(f'test windows went to the desktop\'s display: no private one ({shown.why})')
+    grew = {k: v - before.get(k, 0.0) for k, v in plat.compositor_gtt_mib().items()}
+    if big := {k: g for k, g in grew.items() if g > float(d.get('grew_mib', 1024))}:
+        NOTES.append('the desktop compositor\'s GPU memory grew over this run: ' +
+                     ', '.join(f'{k} +{g:.0f} MiB' for k, g in big.items()) + ' (K16; ~/.local/state/gtt-watch.log)')
+    return rc
+
+
+def _run_shown(cmd: str, extra: list[str], cwd: Path, log: Path, env=None, all_slow: bool = False) -> int:
     """Run a configured command with the extra args appended, everything into `log`."""
     jobs = _jobs()
     if '{jobs}' in cmd:
@@ -188,7 +293,7 @@ def _run(cmd: str, extra: list[str], cwd: Path, log: Path, env=None, all_slow: b
         ref = f'{remote}/{shared}' if not _git(cwd)('rev-parse', '-q', '--verify', f'{remote}/{shared}').returncode \
             else shared
         rc, notes = cargo_gate.run(cmd, cwd, e, jobs, log, ref, all_slow or os.environ.get('KIT_CHECK_ALL') == '1',
-                                   cfg(False).ctx('notes/check-times.json'))
+                                   cfg(False).ctx('notes/check-times.json'), alone=alone)
         NOTES.extend(notes)
         return rc
     with open(log, 'w', encoding='utf-8') as f:
@@ -199,9 +304,9 @@ def _run(cmd: str, extra: list[str], cwd: Path, log: Path, env=None, all_slow: b
 
 def _env(jobs: int, extra: dict | None = None) -> dict:
     """The environment a test command runs in: its share of the cores, however the runner asks for it."""
-    return {**os.environ, 'KIT_JOBS': str(jobs),
-            'RUST_TEST_THREADS': os.environ.get('RUST_TEST_THREADS', str(jobs)),
-            'CARGO_BUILD_JOBS': os.environ.get('CARGO_BUILD_JOBS', str(jobs)), **(extra or {})}
+    return plat.with_env({**os.environ, 'KIT_JOBS': str(jobs),
+                          'RUST_TEST_THREADS': os.environ.get('RUST_TEST_THREADS', str(jobs)),
+                          'CARGO_BUILD_JOBS': os.environ.get('CARGO_BUILD_JOBS', str(jobs))}, extra or {})
 
 
 def _passed_count(text: str) -> int | None:
@@ -361,13 +466,27 @@ def cmd_check(argv: list[str]) -> int:
         steps = want
     cwd = Path.cwd() if (Path.cwd() / '.git').exists() else ROOT
     log = _log_path()
-    lock = None if a.no_gate else _slot()
+    if not a.no_gate:
+        _take_slot(first=a.all)  # --all is the run's merge gate, which every finished task waits on
     try:
         _cap_build_dirs(cwd)
-        rc = _run_steps(steps, cwd, log) if steps else _run(c.test_cmd, extra, cwd, log, all_slow=a.all)
+        if steps:
+            rc = _run_steps(steps, cwd, log)
+        elif len(a.rerun) > 1:
+            # One cargo run each: a gate.toml [[variant]] binary's args carry its features, target directory
+            # and name filter, which in one shared command would reach every other binary too.
+            rc, text, notes = 0, '', []
+            for r in a.rerun:
+                one = _run(c.test_cmd, a.extra + unknown + shlex.split(r), cwd, log, all_slow=a.all)
+                text += log.read_text(encoding='utf-8', errors='replace') if log.exists() else ''
+                notes += NOTES
+                rc = rc or one
+            log.write_text(text, encoding='utf-8')
+            NOTES[:] = notes
+        else:
+            rc = _run(c.test_cmd, extra, cwd, log, all_slow=a.all)
     finally:
-        if lock:
-            lock.release()
+        _release_slot()
     for l in summarise(rc, log, 'SELF-TEST' if steps else 'TESTS'):
         print(l)
     return 0 if rc == 0 else 1
@@ -614,7 +733,7 @@ def cmd_done(argv: list[str]) -> int:
         ap.error('--spec and --blocked are different endings: pick one')
 
     if c.test_cmd and not a.spec:
-        lock = _slot()
+        _take_slot()
         try:
             _cap_build_dirs(cwd)
             log = _log_path()
@@ -634,7 +753,7 @@ def cmd_done(argv: list[str]) -> int:
                     print('\nNothing ticked, nothing committed (the lint is a gate too).', file=sys.stderr)
                     return 1
         finally:
-            lock.release()
+            _release_slot()
     else:
         print('! no [build] test in kit.toml: committing without a test gate', file=sys.stderr)
 

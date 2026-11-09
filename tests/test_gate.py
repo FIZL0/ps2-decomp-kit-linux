@@ -3,8 +3,8 @@
 
     python3 tests/test_gate.py          (needs cargo; no kit.toml, no network, about ten seconds)
 
-What it holds the gate to: the binaries really run at the same time (an `[alone]` one after them), a `[[slow]]` binary is left out
-until the work touches its paths (or `--all`), a `[flaky]` failure gets one lone rerun and counts as a
+What it holds the gate to: the binaries really run at the same time (an `[alone]` one after them, a failed one rerun holding the machine), a `[[slow]]` binary is left out
+until the work touches its paths (or `--all`), a `[flaky]` failure gets one rerun holding the machine and counts as a
 pass only when that rerun passes, and a real failure still fails, with cargo's own rerun line in the log.
 """
 from __future__ import annotations
@@ -14,6 +14,7 @@ import shutil
 import subprocess as sp
 import sys
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -46,7 +47,7 @@ fn stamp(what: &str) {
 
 FILES = {
     'Cargo.toml': '[workspace]\nmembers = ["a"]\nresolver = "2"\n',
-    'a/Cargo.toml': '[package]\nname = "a"\nversion = "0.1.0"\nedition = "2021"\n',
+    'a/Cargo.toml': '[package]\nname = "a"\nversion = "0.1.0"\nedition = "2021"\n\n[features]\nnative = []\n',
     'a/src/lib.rs': 'pub fn two() -> u32 { 2 }\n',
     'a/tests/one.rs': STAMP + '#[test]\nfn waits() { stamp("one+"); '
                       'std::thread::sleep(std::time::Duration::from_millis(1500)); stamp("one-"); }\n',
@@ -57,6 +58,11 @@ FILES = {
     'a/tests/net.rs': '#[test]\nfn binds_a_port() {\n    let f = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../flake");\n'
                       '    if f.exists() { std::fs::remove_file(&f).unwrap(); panic!("Address already in use"); }\n}\n'
                       '#[test]\nfn is_fine() {}\n',
+    # The variant's own tests run only where it has its feature; the other one would fail there, so it
+    # failing says the filter let it in. ../perturb makes the variant's test fail, as a changed constant would.
+    'a/tests/var.rs': '#[test]\nfn native_tolerance_bound() {\n    if !cfg!(feature = "native") { return; }\n'
+                      '    assert!(!std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../perturb").exists(), "past the bound");\n}\n'
+                      '#[test]\nfn exact_only() { assert!(!cfg!(feature = "native")); }\n',
     'gate.toml': '[[slow]]\ntest = "-p a --test slow"\npaths = ["a/src/*"]\n\n'
                  '[flaky]\ntests = ["--test net::binds_a_port$"]\n',
 }
@@ -78,10 +84,20 @@ def test_gate() -> None:
         g('checkout', '-qb', 'task/T1', cwd=w)
         env = {**os.environ, 'CARGO_TARGET_DIR': str(w / 'target'), 'RUST_TEST_THREADS': '4'}
 
-        def gate(all_slow=False):
+        held = []  # one entry each time the gate takes the machine (checks.alone's place here)
+
+        @contextmanager
+        def machine(also=None):
+            held.append(1)
+            if also:
+                also()
+            yield
+
+        def gate(all_slow=False, alone=machine):
             (w / 'stamps').unlink(missing_ok=True)
+            held.clear()
             return cargo_gate.run('cargo test -q --message-format=short', w, env, 4, w / 'log', 'main',
-                                  all_slow, w / 'times.json')
+                                  all_slow, w / 'times.json', alone=alone)
 
         check(cargo_gate.applies('cargo test -q --message-format=short', []), 'a bare cargo test is a whole run')
         check(not cargo_gate.applies('cargo test -q', ['-p', 'a']), 'a filtered one is left to cargo')
@@ -103,6 +119,15 @@ def test_gate() -> None:
         rc, _ = gate()
         s = {k: float(v) for k, v in (l.split() for l in (w / 'stamps').read_text().splitlines())}
         check(rc == 0 and s['two+'] >= s['one-'], 'an [alone] binary runs after the pool, not beside it')
+        check(not held, 'and one that passes never takes the machine')
+        (w / 'gate.toml').write_text('[alone]\ntests = ["-p a --test net"]\n')
+        (w / 'flake').write_text('')
+        rc, notes = gate()
+        check(rc == 0 and held == [1], f'an [alone] failure reruns once holding the machine, and passes (rc {rc}, held {held})')
+        check(any('machine to itself' in n and 'binds_a_port' in n for n in notes), 'and the verdict names it')
+        (w / 'flake').write_text('')
+        rc, _ = gate(alone=lambda: machine(lambda: (w / 'flake').write_text('')))
+        check(rc == 101 and 'failed again' in (w / 'log').read_text(), 'one that fails with the machine to itself fails the gate')
         (w / 'gate.toml').write_text(gt)
         rc, notes = gate(all_slow=True)
         check(rc == 0 and '-p a --test slow' in (w / 'log').read_text(), '--all runs it untouched')
@@ -111,6 +136,7 @@ def test_gate() -> None:
         rc, notes = gate()
         check(rc == 0, f'a known flake that passes alone passes the gate (rc {rc})')
         check(any('binds_a_port' in n for n in notes), 'and the verdict names it')
+        check(held == [1], f'and its rerun held the machine (held {held})')
 
         (w / 'gate.toml').write_text('[flaky]\ntests = []\n')
         (w / 'flake').write_text('')
@@ -120,6 +146,22 @@ def test_gate() -> None:
         check('error: test failed, to rerun pass `-p a --test net`' in log, "with cargo's rerun line")
         check('Address already in use' in log, 'and its panic in the log')
 
+        variant = '[[variant]]\nfeatures = "a/native"\ntarget_dir = "target/var"\nfilter = "native_tolerance"\n' \
+                  'tests = ["-p a --test var"]\n'
+        (w / 'gate.toml').write_text(variant)
+        rc, _ = gate()
+        log = (w / 'log').read_text()
+        args = '-p a --features a/native --target-dir target/var --test var native_tolerance'
+        check(rc == 0 and f'({args},' in log, f'a [[variant]] binary runs, filtered, with its features (rc {rc})')
+        check((w / 'target/var').is_dir(), 'built into its own target directory')
+        (w / 'perturb').write_text('')
+        rc, _ = gate()
+        log = (w / 'log').read_text()
+        (w / 'perturb').unlink()
+        check(rc == 101 and f'error: test failed, to rerun pass `{args}`' in log and 'past the bound' in log,
+              'a variant test that fails fails the gate, with a rerun line that rebuilds just it')
+        check('rerun pass `-p a --test var`' not in log, 'and the plain build of the same binary still passes')
+
         (w / 'a/src/lib.rs').write_text('pub fn two() -> u32 { nope }\n')
         rc, _ = gate()
         log = (w / 'log').read_text()
@@ -127,7 +169,77 @@ def test_gate() -> None:
         check('to rerun pass' not in log, 'and no test reads as having run')
 
 
+# `[select]`: a uses nothing, b uses a, c stands alone; b's `names` test reads oracle.txt's "alpha".
+PICK = {
+    'Cargo.toml': '[workspace]\nmembers = ["a", "b", "c"]\nresolver = "2"\n',
+    'a/Cargo.toml': '[package]\nname = "a"\nversion = "0.1.0"\nedition = "2021"\n',
+    'a/src/lib.rs': '/// ```\n/// assert_eq!(a::two(), 2);\n/// ```\npub fn two() -> u32 { 2 }\n',
+    'a/tests/one.rs': '#[test]\nfn one() { assert_eq!(a::two(), 2); }\n',
+    'a/tests/other.rs': '#[test]\nfn other() {}\n',
+    'b/Cargo.toml': '[package]\nname = "b"\nversion = "0.1.0"\nedition = "2021"\n\n[dependencies]\na = { path = "../a" }\n',
+    'b/src/lib.rs': 'pub fn four() -> u32 { a::two() * 2 }\n',
+    'b/tests/uses.rs': '#[test]\nfn uses() { assert_eq!(b::four(), 4); }\n',
+    'b/tests/names.rs': '#[test]\nfn names() { let _ = "alpha"; }\n',
+    'c/Cargo.toml': '[package]\nname = "c"\nversion = "0.1.0"\nedition = "2021"\n',
+    'c/src/lib.rs': 'pub fn one() -> u32 { 1 }\n',
+    'c/tests/alone.rs': '#[test]\nfn alone() { assert_eq!(c::one(), 1); }\n',
+    'research/oracle.txt': '# names\nalpha boot 0x00100000 one\nbeta boot 0x00100010 two\n',
+    'research/c9/rows.csv': 'a,b\n',
+    'gate.toml': '[select]\noracle = "research/oracle.txt"\ndata = ["research"]\nignore = ["*.md"]\n',
+}
+
+
+def test_select() -> None:
+    if not shutil.which('cargo'):
+        print('  skip  no cargo on PATH')
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        w = Path(tmp)
+        for rel, text in PICK.items():
+            (w / rel).parent.mkdir(parents=True, exist_ok=True)
+            (w / rel).write_text(text)
+        g('init', '-q', '-b', 'main', cwd=w)
+        (w / '.gitignore').write_text('target/\ntimes.json\nlog\nCargo.lock\n')
+        g('add', '-A', cwd=w)
+        g('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'base', cwd=w)
+        g('checkout', '-qb', 'task/T2', cwd=w)
+        env = {**os.environ, 'CARGO_TARGET_DIR': str(w / 'target'), 'RUST_TEST_THREADS': '4'}
+
+        def ran(edit: dict, all_slow=False) -> set[str]:
+            for rel, text in edit.items():
+                (w / rel).write_text(text)
+            rc, _ = cargo_gate.run('cargo test -q --message-format=short', w, env, 4, w / 'log', 'main',
+                                   all_slow, w / 'times.json')
+            log = (w / 'log').read_text()
+            g('checkout', '-q', '--', '.', cwd=w)
+            for rel in edit:
+                if not g('ls-files', '--error-unmatch', rel, cwd=w).returncode == 0:
+                    (w / rel).unlink()
+            check(rc == 0, f'passes (rc {rc})')
+            got = {l.split('(', 1)[1].split(',')[0] for l in log.splitlines() if l.startswith('     Running ')}
+            return got | ({'doc'} if '   Doc-tests' in log else set())
+
+        got = ran({'c/src/lib.rs': 'pub fn one() -> u32 { 2 - 1 }\n'})
+        check(got == {'-p c --lib', '-p c --test alone', 'doc'}, f'a crate nothing uses: its own binaries ({sorted(got)})')
+        got = ran({'a/tests/one.rs': '#[test]\nfn one() { assert_eq!(a::two(), 1 + 1); }\n'})
+        check(got == {'-p a --test one'}, f'a test file: that binary alone, no doc tests ({sorted(got)})')
+        got = ran({'a/src/lib.rs': PICK['a/src/lib.rs'] + '\npub fn three() -> u32 { 3 }\n'})
+        check({'-p a --test one', '-p a --test other', '-p b --test uses', '-p b --test names', 'doc'} <= got
+              and not any(a.startswith('-p c') for a in got), f'a used crate: it and its users, not c ({sorted(got)})')
+        got = ran({'research/oracle.txt': PICK['research/oracle.txt'].replace('0x00100000', '0x00100004')})
+        check(got == {'-p b --test names'}, f"an oracle line: the binary naming it ({sorted(got)})")
+        got = ran({'research/c9/rows.csv': 'a,b\n1,2\n'})
+        check(got == set(), f'a research file no test names reaches nothing ({sorted(got)})')
+        got = ran({'notes.md': 'hi\n'})
+        check(got == set(), f'an ignored file reaches nothing ({sorted(got)})')
+        got = ran({'Cargo.toml': PICK['Cargo.toml'] + '\n'})
+        check({'-p a --test one', '-p b --test uses', '-p c --test alone'} <= got, f'the workspace manifest: everything ({sorted(got)})')
+        got = ran({'c/src/lib.rs': 'pub fn one() -> u32 { 2 - 1 }\n'}, all_slow=True)
+        check({'-p a --test one', '-p b --test uses', '-p c --test alone'} <= got, f'--all: everything ({sorted(got)})')
+
+
 if __name__ == '__main__':
     test_gate()
+    test_select()
     print(f'\n{ok} passed, {fail} failed')
     sys.exit(1 if fail else 0)

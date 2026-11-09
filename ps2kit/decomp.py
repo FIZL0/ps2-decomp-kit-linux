@@ -59,13 +59,17 @@ def default_program() -> str:
 def dump(program: str | None, ext: str = '.c') -> Path:
     c = cfg()
     program = program or default_program()
-    if program not in c.programs:
-        raise DumpError(f'no program named {program!r} in kit.toml (have: {", ".join(c.programs)})')
     p = c.ctx('decomp', f'{program}{ext}')
+    # An [other.<name>] program answers from its dumps alone: kit.toml is not committed, so a worktree
+    # that shares the dumps but not the block can still read them.
+    other = program in c.others or (program not in c.programs and p.exists())
+    if program not in c.programs and not other:
+        raise DumpError(f'no program named {program!r} in kit.toml (have: {", ".join(c.programs)}'
+                        + (f'; -o {", ".join(c.others)}' if c.others else '') + ')')
     if not p.exists():
         what = {'.c': 'decompilation', '.funcs.tsv': 'function table', '.xrefs.tsv': 'cross-references'}[ext]
         raise DumpError(f'no {what} for {program!r} yet ({p}).\n'
-                        f'    ./kit ghidra dump --program {program}\n'
+                        f'    ./kit ghidra dump {"-o" if other else "--program"} {program}\n'
                         '(and if the project has never been analysed: ./kit ghidra analyse first — that is '
                         'the slow one)')
     return p
@@ -379,11 +383,19 @@ COP2 = {0x1c: 'vmulq', 0x1d: 'vmaxi', 0x1e: 'vmuli', 0x1f: 'vminii', 0x20: 'vadd
         0x35: 'vior', 0x38: 'vcallms', 0x39: 'vcallmsr'}
 COP2_BC = {0x00: 'vadd', 0x04: 'vsub', 0x08: 'vmadd', 0x0c: 'vmsub', 0x10: 'vmax', 0x14: 'vmini',
            0x18: 'vmul'}
+# The forms whose third operand is the Q or the I register rather than a vector register. Spelled out
+# because the mnemonics are not tellable apart by their last letter: `vmini` takes ft, `vminii` takes I.
+COP2_Q = {'vmulq', 'vaddq', 'vsubq', 'vmaddq', 'vmsubq'}
+COP2_I = {'vmuli', 'vaddi', 'vsubi', 'vmaddi', 'vmsubi', 'vmaxi', 'vminii'}
 # "special2": funct 0x3c..0x3f, with bits 10..6 extending it to (bits10_6 << 2) | (funct & 3).
+# 0x2b has no instruction; 0x2e..0x31 are vopmula/vnop/vmove/vmr32, which is one slot later than it
+# looks — a game's cross products are `vopmula` at 0x2e paired with `vopmsub`, and its four `vnop`s
+# before a `cfc2` are 0x2f.
 COP2_S2 = {0x1c: 'vmulaq', 0x1d: 'vabs', 0x1e: 'vmulai', 0x1f: 'vclipw', 0x20: 'vaddaq', 0x21: 'vmaddaq',
            0x22: 'vaddai', 0x23: 'vmaddai', 0x24: 'vsubaq', 0x25: 'vmsubaq', 0x26: 'vsubai',
-           0x27: 'vmsubai', 0x28: 'vadda', 0x29: 'vmadda', 0x2a: 'vmula', 0x2b: 'vopmula', 0x2c: 'vsuba',
-           0x2d: 'vmsuba', 0x2e: 'vnop', 0x2f: 'vmove', 0x30: 'vmr32', 0x34: 'vlqi', 0x35: 'vsqi',
+           0x27: 'vmsubai', 0x28: 'vadda', 0x29: 'vmadda', 0x2a: 'vmula', 0x2c: 'vsuba',
+           0x2d: 'vmsuba', 0x2e: 'vopmula', 0x2f: 'vnop', 0x30: 'vmove', 0x31: 'vmr32',
+           0x34: 'vlqi', 0x35: 'vsqi',
            0x36: 'vlqd', 0x37: 'vsqd', 0x38: 'vdiv', 0x39: 'vsqrt', 0x3a: 'vrsqrt', 0x3b: 'vwaitq',
            0x3c: 'vmtir', 0x3d: 'vmfir', 0x3e: 'vilwr', 0x3f: 'viswr', 0x40: 'vrnext', 0x41: 'vrget',
            0x42: 'vrinit', 0x43: 'vrxor'}
@@ -474,7 +486,7 @@ def _cop2(w: int, rs, rt, rd, sa, fn) -> str | None:
         if m in ('vnop', 'vwaitq'):
             return m
         if m in ('vdiv', 'vsqrt', 'vrsqrt'):
-            return f'{m:<9} Q, $vf{rd}{_bcsuf(w, 1)}, $vf{rt}{_bcsuf(w, 0)}'
+            return f'{m:<9} Q, $vf{rd}{_bcsuf(w, 0)}, $vf{rt}{_bcsuf(w, 1)}'
         if m in ('vmtir', 'vmfir', 'vilwr', 'viswr', 'vrnext', 'vrget', 'vrinit', 'vrxor'):
             return f'{m + d:<9} $vi{rt}, $vf{rd}'
         if m in ('vlqi', 'vsqi', 'vlqd', 'vsqd'):
@@ -495,14 +507,15 @@ def _cop2(w: int, rs, rt, rd, sa, fn) -> str | None:
         return f'{m:<9} {((w >> 6) & 0x7fff) * 8:#x}'
     if m == 'vcallmsr':
         return f'{m:<9} $vi27'
-    if m.endswith(('q', 'i')) and m not in ('vmulq',) or m in ('vmulq',):
-        src = 'Q' if m.endswith('q') else 'I'
+    if m in COP2_Q or m in COP2_I:
+        src = 'Q' if m in COP2_Q else 'I'
         return f'{m + _dest(w):<9} $vf{sa}, $vf{rd}, {src}'
     return f'{m + _dest(w):<9} $vf{sa}, $vf{rd}, $vf{rt}'
 
 
 def _bcsuf(w: int, which: int) -> str:
-    """vdiv/vsqrt take a single component of each source, encoded in the ft/fs broadcast fields."""
+    """vdiv/vsqrt take a single component of each source: FSF (bits 22..21) picks fs's, FTF (bits
+    24..23) picks ft's. `which` is 0 for fs, 1 for ft."""
     f = (w >> (23 if which else 21)) & 3
     return BC[f]
 
@@ -710,6 +723,7 @@ FN_DOC = """Print one decompiled function.
   ./kit fn update_player          by name, from the Ghidra project's own names
   ./kit fn @serve_entry           by a [symbols] name in kit.toml
   ./kit fn 1000a0 -p boot         a different program (default: the last overlay)
+  ./kit fn MotocrossRider::vf12 -o pc   an [other.pc] program (another build, read for reference)
   ./kit fn 1000a0 --context 3     plus the call sites in its first 3 callers
 
 The dump itself is tens of megabytes: this streams it and stops at the next function, so the cost of
@@ -722,12 +736,13 @@ def cmd_fn(argv: list[str]) -> int:
     ap = parser('fn', FN_DOC)
     ap.add_argument('addr', help='address (hex / 0x…), @symbol, or a function name')
     ap.add_argument('--program', '-p', metavar='NAME', help='program to read (default: the last overlay)')
+    ap.add_argument('--other', '-o', metavar='NAME', help='an [other.NAME] program instead of the disc\'s')
     ap.add_argument('--context', type=int, default=0, metavar='N',
                     help='also show the call sites in N of its callers')
     ap.add_argument('--limit', type=int, default=300, metavar='N', help='lines to print (default 300)')
     args = ap.parse_args(argv)
     try:
-        prog = args.program or default_program()
+        prog = args.other or args.program or default_program()
         a = resolve(args.addr, prog)
         table = funcs(prog)
         fn = table.get(a)
@@ -792,11 +807,12 @@ def cmd_xref(argv: list[str]) -> int:
     ap = parser('xref', XREF_DOC)
     ap.add_argument('addr', help='address (hex / 0x…), @symbol, or a function name')
     ap.add_argument('--program', '-p', metavar='NAME')
+    ap.add_argument('--other', '-o', metavar='NAME', help='an [other.NAME] program instead of the disc\'s')
     ap.add_argument('--similar', action='store_true', help='look-alike functions instead of references')
     ap.add_argument('--limit', type=int, default=40, metavar='N', help='rows per section (default 40)')
     args = ap.parse_args(argv)
     try:
-        prog = args.program or default_program()
+        prog = args.other or args.program or default_program()
         a = resolve(args.addr, prog)
         table = funcs(prog)
         if args.similar:

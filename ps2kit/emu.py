@@ -129,6 +129,18 @@ def _ini_set(path: Path, section: str, key: str, value) -> None:
     path.write_text('\n'.join(lines) + '\n', encoding='utf-8', errors='surrogateescape')
 
 
+def _ini_get_in(path: Path, section: str, key: str, default: str = '') -> str:
+    if not path.exists():
+        return default
+    inside = False
+    for l in path.read_text(encoding='utf-8', errors='surrogateescape').splitlines():
+        if l.lstrip().startswith('['):
+            inside = l.strip() == f'[{section}]'
+        elif inside and re.match(rf'\s*{re.escape(key)}\s*=', l):
+            return l.split('=', 1)[1].strip()
+    return default
+
+
 def _ini_del(path: Path, key: str) -> None:
     if not path.exists():
         return
@@ -170,6 +182,8 @@ def _ini_set_in(path: Path, section: str, pairs: list[tuple[str, str]]) -> None:
                     lines[i] = f'{k} = {v}'
                     break
             else:
+                while end > start + 1 and not lines[end - 1].strip():
+                    end -= 1    # keep the blank line between sections below the new key
                 lines.insert(end, f'{k} = {v}')
                 end += 1
     path.write_text('\n'.join(lines) + '\n', encoding='utf-8', errors='surrogateescape')
@@ -466,6 +480,13 @@ def status() -> int | None:
 
 # --- kit copies --------------------------------------------------------------
 
+# Port 2 as a DualShock2 on the second SDL pad. A user's ini usually ships `[Pad2] Type = None`, and with
+# that a two-pad .p2m2 plays with P2 unplugged: the capture looks fine and rides one rider. The copy's
+# SDL filter only lets its own kit pad through, so SDL-1 is normally absent and P2 is driven by the tape.
+def pad2_rows() -> list[tuple[str, str, str]]:
+    return [(('Pad2',) + r[1:]) for r in pad1_rows('SDL-1')]
+
+
 def copy_config(n: int) -> Path:
     """Create (or refresh) kit copy `n` from the user's own PCSX2 config, and return its config dir.
 
@@ -515,6 +536,7 @@ def copy_config(n: int) -> Path:
     # inherits the user's own port 1, which on a keyboard-playing machine is bound to the input source
     # switched off two lines above. Section-aware, because [Pad2] shares these key names.
     _ini_set_in(ini, 'Pad1', [(k, v) for _, k, v in pad1_rows()])
+    _ini_set_in(ini, 'Pad2', [(k, v) for _, k, v in pad2_rows()])
     _ini_del(ini, 'FrameAdvance')   # frame-advance bound to a pad button pauses copies by accident
     for sub in ('savestates', 'memcards', 'snaps', 'logs'):
         (dst / sub).mkdir(parents=True, exist_ok=True)

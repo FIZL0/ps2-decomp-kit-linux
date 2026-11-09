@@ -1044,6 +1044,28 @@ def _():
         os.environ.pop('KIT_PCSX2', None)
 
 
+@check('copies live in `agent-runner home slots`, or beside the main checkout when the runner lacks it')
+def _(copies_root=PLAT.copies_root):
+    bin_ = WORK / 'runner-bin'
+    bin_.mkdir(exist_ok=True)
+    (bin_ / 'git').symlink_to(shutil.which('git'))
+    runner = bin_ / 'agent-runner'
+    path = os.environ['PATH']
+    out = subprocess.run(['git', 'worktree', 'list', '--porcelain'], cwd=Path(__file__).parent, capture_output=True, text=True)
+    main = Path(out.stdout.splitlines()[0].split(' ', 1)[1])
+    try:
+        os.environ['PATH'] = str(bin_)
+        assert copies_root() == main.parent / f'{main.name}-slots' / 'pcsx2', 'no agent-runner at all'
+        runner.write_text('#!/bin/sh\necho "usage: agent-runner ..." >&2\nexit 2\n')
+        runner.chmod(0o755)
+        assert copies_root() == main.parent / f'{main.name}-slots' / 'pcsx2', \
+            'agent-runner before 0.13.1 has no `home`: every worktree shares <main>-slots, not <worktree>-slots'
+        runner.write_text('#!/bin/sh\n[ "$1 $2" = "home slots" ] && echo /runs/openmx && exit 0\nexit 2\n')
+        assert copies_root() == Path('/runs/openmx/pcsx2'), 'the runner\'s answer wins'
+    finally:
+        os.environ['PATH'] = path
+
+
 @check("a copy's save states and memory cards are its own, written as absolute paths")
 def _():
     emu_env(inst='3')
@@ -1097,8 +1119,8 @@ def _():
             'a copy that keeps Keyboard/K on port 1 gets no input at all: the source is off below'
         assert pad1['L2'] == 'SDL-0/+LeftTrigger' and pad1['RLeft'] == 'SDL-0/-RightX'
         assert pad1['Type'] == 'DualShock2', 'a port whose type is None also receives nothing'
-        assert EMU._ini_section(ini, 'Pad2') == {'Type': 'DualShock2', 'Start': 'SDL-1/Start',
-                                                 'Cross': 'SDL-1/A'}, 'port 2 is left alone'
+        assert EMU._ini_section(ini, 'Pad2')['Cross'] == 'SDL-1/A' and \
+            EMU._ini_section(ini, 'Pad2')['L2'] == 'SDL-1/+LeftTrigger', 'port 2 is the second kit pad'
         assert EMU._ini_section(ini, 'USB1') == {'Type': 'None'}, "a section-blind write lands here"
         assert EMU._ini_get(ini, 'Keyboard') == 'false' and EMU.pad1_sources('5') == {'SDL'}
         assert EMU.pad1_problem('5') is None
@@ -1131,6 +1153,32 @@ def _():
     rv, out, _ = out_of(PAD.cmd_pad, ['check'])
     assert 'no PCSX2 config yet' in out and EMU.pad1_problem() is None, \
         'no ini is not a broken binding; it is nothing to say anything about'
+
+
+@check("a copy plugs a DualShock2 into port 2 on SDL-1, and leaves port 1's bindings on SDL-0")
+def _():
+    emu_env(inst='3')
+    own = PLAT.pcsx2_config_dir('') / 'inis' / 'PCSX2.ini'
+    real_ini = own.read_text()
+    # The shape a user's ini has: Pad1 on the keyboard, Pad2 unplugged. Copy 4 rode one rider on this.
+    own.write_text(real_ini + '\n[Pad1]\nType = DualShock2\nUp = Keyboard/Up\nCross = Keyboard/X\n'
+                   '\n[Pad2]\nType = None\n\n[Hotkeys]\nOpenPauseMenu = Keyboard/Escape\n')
+    try:
+        dst, _, _ = out_of(EMU.copy_config, 3)
+        ini = EMU.ini_path('3')
+        for _ in range(2):      # and a refresh of the copy changes nothing
+            assert EMU._ini_get_in(ini, 'Pad2', 'Type') == 'DualShock2', 'Type = None plays P2 idle'
+            assert EMU._ini_get_in(ini, 'Pad1', 'Type') == 'DualShock2'
+            for _, key, bind in EMU.pad1_rows():
+                assert EMU._ini_get_in(ini, 'Pad1', key) == bind
+                assert EMU._ini_get_in(ini, 'Pad2', key) == bind.replace('SDL-0/', 'SDL-1/'), key
+            text = ini.read_text()
+            assert text.count('[Pad2]') == 1 and text.count('Type = ') == 2
+            assert 'Keyboard/Up' not in text and '\n\n[Hotkeys]' in text
+            out_of(EMU.copy_config, 3)
+    finally:
+        own.write_text(real_ini)
+        os.environ.pop('KIT_PCSX2', None)
 
 
 @check('the emulator this instance started is tracked by pid file and checked by name')

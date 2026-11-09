@@ -6,18 +6,37 @@
 brief_extra = "./kit plan phase {id}"
 
 [run]
+# d: never two running tasks on one file, and a Next (in this order) section one task at a time. agent-runner
+# 0.13.3+ defaults to p (strict plan order, both checks off), which puts tasks on the same file side by side.
+mode = "d"
 command = "./kit"
 test = "./kit check --all"
+# The gate's limit counts the wait for a check slot: at load 90-110 with three slots' `kit done` holding the
+# locks, a clean merge whose tests take 10 min ran past agent-runner's default 3600 s.
+timeout = 14400
 rules = "AGENT.md"
 untested = ["*.md", ".github/*"]
 # A post-merge failure is rerun alone before it parks the branch: the netplay/lobby/udp kind of test times out
 # or loses its port under the other slots' load and passes alone. Each name is cargo's "to rerun pass" args.
 failures = 'to rerun pass `([^`]+)`'
 retest = "./kit check --rerun {names}"
+# A load flake the gate's own [flaky] rerun let through (checks.py prints it under the PASSED line) is still a
+# test to fix: agent-runner files a critical K task to make it robust, unless an open task names it.
+flaky = '^\s*\(passed on a lone rerun \(load flakes, gate\.toml\): (.+)\)$'
+flaky_kind = "K"
+# A port with GitHub Actions on its main branch can list the workflows to watch: agent-runner 0.7.3+ reads the
+# newest finished run while a run is up and files one critical B task for a red one, none while it is open.
+# ci_watch = ["ci.yml"]
+# What a fix or repair session builds before it commits a merge: every test target, so a clash git merged
+# without a conflict (two sides adding one name) shows here and not in the gate after it. The gate reuses it.
+build = "cargo test -q --no-run --message-format=short"
 slot_env = ["KIT_PCSX2={n}", "KIT_RUN=1"]
 pass_env = ["KIT_CONFIG", "KIT_CHECK_SLOTS", "AGENT_RUNNER_IDLE_BG"]
 on_exit = "./kit pcsx2 stop"
 not_attempt = "^{id} spec:"
+# No new slot while MemAvailable is under 16 GiB: a slot's gate builds and tests in several GiB, and on 10-30
+# a desktop compositor's leak had taken all but 1 GiB of 124 when the kernel OOM-killed the runner (K16).
+before_start = "python3 -m ps2kit.platform_ room 16"
 suspect = "BLOCKED:.*(pcsx2|pine|capture|record|screenshot|save state|unattended)"
 prompt_extra = """
 You have your own emulator copy: KIT_PCSX2={n} is set, so `./kit pcsx2 start`, `./kit pine`, `./kit pad` and \
@@ -26,6 +45,9 @@ as a single job under `./kit pcsx2 with -- <cmd>` so it holds the emulator for t
 short. Close your copy when you are done with it: `./kit pcsx2 stop` (never kill the process by name — the \
 other slots' copies are running too). On a usage limit, leave the emulator running.
 
-Also read docs/. Tests only through `./kit check` (one line when they pass; it says plainly whether the build \
+Read a doc in docs/ only when the task touches it, never the folder whole: PCSX2.md (driving the emulator), \
+PROVING.md (proving a match), PS2.md (hardware), GHIDRA.md (the decompiler), TROUBLESHOOTING.md (a tool \
+fails), INTERNALS.md (changing ps2kit/). A task that names a concept .html opens that file and no other. \
+Tests only through `./kit check` (one line when they pass; it says plainly whether the build \
 broke or a test failed). Read decompilation with `./kit fn` / `./kit xref`, never whole files.
 """
