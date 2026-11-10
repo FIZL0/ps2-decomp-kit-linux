@@ -254,24 +254,6 @@ class Config:
     def build_error_re(self) -> re.Pattern:
         return re.compile(self.raw.get('build', {}).get('build_error') or r'^error(\[E[0-9]+\])?:|: error:')
 
-    # --- [run] ----------------------------------------------------------------
-    @property
-    def fix_merges(self) -> bool:
-        """Whether a conflict the runner cannot join goes to an agent session instead of to a human.
-        `[run] fix_merges = false` leaves every such merge for a human."""
-        return bool(self.raw.get('run', {}).get('fix_merges', True))
-
-    @property
-    def fix_timeout(self) -> int:
-        """Seconds a merge fixer may take before the merge is left for a human instead."""
-        return int(self.raw.get('run', {}).get('fix_timeout', 1200))
-
-    @property
-    def fix_model(self) -> str:
-        """The model that fixes merges. The default is the one the run's agents use."""
-        return str(self.raw.get('run', {}).get('fix_model')
-                   or os.environ.get('KIT_MODEL') or 'opus')
-
     # --- [git] ----------------------------------------------------------------
     @property
     def push_remote(self) -> str | None:
@@ -298,8 +280,9 @@ class Config:
 
     @property
     def fix_timeout(self) -> int:
-        """Seconds a merge fixer may take before the merge is left for a human instead."""
-        return int(self.raw.get('run', {}).get('fix_timeout', 1200))
+        """Seconds a merge fixer may take before the merge is left for a human instead: 1200 left
+        a two-sided race.rs conflict (S294a, 11-09) for a human."""
+        return int(self.raw.get('run', {}).get('fix_timeout', 2400))
 
     @property
     def fix_model(self) -> str:
