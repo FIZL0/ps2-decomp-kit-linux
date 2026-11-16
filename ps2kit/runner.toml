@@ -7,14 +7,13 @@
 # on-demand half of the agent instructions.
 lookup = ["PLAN.md", "plan/CODEMAP.md", "plan/MECHANICS.md"]
 brief_extra = "./kit plan phase {id}"
-# `plan add` refuses a task line with no `files:` and no `test:` field: mode d keeps tasks apart by
+# `plan add` refuses a task line with no `files:` and no `test:` field: the run keeps tasks apart by
 # those files, and a line naming none ran beside anything (agent-runner 0.19.5).
 need_files = true
 
 [run]
 # d: never two running tasks on one file, and a Next (in this order) section one task at a time. agent-runner
 # 0.13.3+ defaults to p (strict plan order, both checks off), which puts tasks on the same file side by side.
-mode = "d"
 command = "./kit"
 test = "./kit check --all"
 # The gate's limit counts the wait for a check slot: at load 90-110 with three slots' `kit done` holding the
