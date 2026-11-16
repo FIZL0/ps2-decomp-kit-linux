@@ -3,6 +3,9 @@
 # fix_*), then a kit.toml `[agent-runner]` table on top, and writes the result to <context>/notes/agent-runner.toml.
 
 [plan]
+# Files `plan "<heading>"` also searches (after TODO, REFERENCE, HUMAN, DONE and AGENT.md): the
+# on-demand half of the agent instructions.
+lookup = ["PLAN.md", "plan/CODEMAP.md", "plan/MECHANICS.md"]
 brief_extra = "./kit plan phase {id}"
 # `plan add` refuses a task line with no `files:` and no `test:` field: mode d keeps tasks apart by
 # those files, and a line naming none ran beside anything (agent-runner 0.19.5).
