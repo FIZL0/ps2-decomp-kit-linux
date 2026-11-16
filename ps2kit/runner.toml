@@ -4,7 +4,7 @@
 
 [plan]
 brief_extra = "./kit plan phase {id}"
-# `plan add` refuses a task line that names no files (→) and no test (| t:): mode d keeps tasks apart by
+# `plan add` refuses a task line with no `files:` and no `test:` field: mode d keeps tasks apart by
 # those files, and a line naming none ran beside anything (agent-runner 0.19.5).
 need_files = true
 
@@ -18,7 +18,7 @@ test = "./kit check --all"
 # locks, a clean merge whose tests take 10 min ran past agent-runner's default 3600 s.
 timeout = 14400
 rules = "AGENT.md"
-untested = ["*.md", ".github/*"]
+untested = ["*.md", "LICENSE*", ".github/*"]
 # A post-merge failure is rerun alone before it parks the branch: the netplay/lobby/udp kind of test times out
 # or loses its port under the other slots' load and passes alone. Each name is cargo's "to rerun pass" args.
 failures = 'to rerun pass `([^`]+)`'
