@@ -12,6 +12,7 @@ brief_extra = "./kit plan phase {id}"
 need_files = true
 
 [run]
+auto_upgrade = true  # upgrade agent-runner by itself when a newer release is out, between merges
 # d: never two running tasks on one file, and a Next (in this order) section one task at a time. agent-runner
 # 0.13.3+ defaults to p (strict plan order, both checks off), which puts tasks on the same file side by side.
 command = "./kit"
