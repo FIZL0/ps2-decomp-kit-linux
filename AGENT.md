@@ -82,3 +82,5 @@ reopens once they are done), take the next task, preferably in another section (
 within one). A stopped emulator is not a blocker (start it), nor a usage limit (commit what is solid, wait).
 Never end a run while open tasks remain; list the blockers at the end. Human-only things go in
 `plan/HUMAN.md`, never into code as a guess.
+
+Tasks: this repo is worked by agent-runner. Use the agent-runner skill (or run `./kit guide`): queue work with `./kit plan add`, never edit the plan's TODO.md by hand, never merge task/* or wip/* branches. Asked to do something now? Use `./kit take "what" --kind K` (a worktree of your own; `--here` brings edits already made along); never edit the main checkout.
